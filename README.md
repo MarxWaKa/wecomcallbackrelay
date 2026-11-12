@@ -82,11 +82,11 @@
 
 ## 快速部署（Docker Compose）
 
-前置条件：Linux 服务器已安装 Docker 与 Docker Compose v2，80/443、3306（可选）端口可用。
+前置条件：Linux 服务器已安装 Docker 与 Docker Compose v2，80/443（或自定义 `FRONTEND_PORT`）端口可用；MySQL/backend 仅 Docker 内部访问。
 
 ```bash
 cp .env.example .env
-# 修改 .env：MYSQL_ROOT_PASSWORD、JWT_SECRET、CONFIG_ENCRYPT_KEY、ADMIN_PASSWORD
+# 修改 .env：MYSQL_PASSWORD、JWT_SECRET、CONFIG_ENCRYPT_KEY、ADMIN_PASSWORD
 vim .env
 
 docker compose up -d --build
@@ -96,7 +96,7 @@ docker compose logs -f backend
 
 启动后：
 
-1. 访问 `http://服务器IP/`（默认 80 端口），使用 `ADMIN_USERNAME / ADMIN_PASSWORD` 登录。
+1. 访问 `http://服务器IP:8889/`（默认 `FRONTEND_PORT=8889`），使用 `ADMIN_USERNAME / ADMIN_PASSWORD` 登录。生产环境建议通过外层 HTTPS Nginx 访问。
 
 2. 在「企微参数」填写 CorpID、Secret、Token、EncodingAESKey。
 
@@ -132,20 +132,22 @@ docker compose logs -f backend
 
 ### 端口
 
-| 服务 | 容器端口 | 宿主机默认端口 | 说明 |
+| 服务 | 容器端口 | 宿主机端口 | 说明 |
 | :--- | :--- | :--- | :--- |
-| frontend | 8889 | `${FRONTEND_PORT}`=8889 | 管理后台 + `/api`、`/wecom` 反向代理 |
-| backend | 8888 | `${BACKEND_PORT}`=8888 | 可只在内网暴露 |
-| mysql | 3306 | `${MYSQL_PORT}`=3306 | 生产建议不映射到公网 |
+| frontend | 80 | `${FRONTEND_PORT}`=8889 | 管理后台 + `/api`、`/wecom` 反向代理，唯一对宿主机暴露的端口 |
+| backend | 8888 | 不映射 | 仅 Docker 内部网络，由 frontend nginx 代理 |
+| mysql | 3306 | 不映射 | 仅 Docker 内部网络，由 backend 访问 |
 
 ## 配置项
 
 | 环境变量 | 必填 | 默认值 | 说明 |
 | :--- | :---: | :--- | :--- |
-| `MYSQL_ROOT_PASSWORD` | 是 | - | MySQL root 密码（compose 使用） |
-| `DB_HOST` / `DB_PORT` | 否 | `127.0.0.1` / `3306` | compose 中为 `mysql` / `3306` |
-| `DB_USER` / `DB_PASSWORD` / `DB_NAME` | 是 | - / - / `wecom_relay` | 数据库连接 |
-| `SERVER_PORT` | 否 | `8888` | 后端监听端口 |
+| `MYSQL_PASSWORD` | 是 | - | MySQL root 密码（compose 注入为 `MYSQL_ROOT_PASSWORD`） |
+| `MYSQL_USER` | 否 | `root` | 后端连接 MySQL 的用户（只传给 backend 的 `DB_USER`，非 root 账号需手动创建） |
+| `MYSQL_TCP_PORT` | 否 | `3306` | MySQL 容器端口 / 后端 `DB_PORT` |
+| `MYSQL_DB_NAME` | 否 | `wecom_relay` | 数据库名 |
+| `FRONTEND_PORT` | 否 | `8889` | 前端对外端口 |
+| `BACKEND_PORT` | 否 | `8888` | 后端容器内部端口；必须与 `web/nginx.conf` 的 8888 一致 |
 | `JWT_SECRET` | 是 | - | 至少 16 字符，建议 32+ 随机串 |
 | `JWT_EXPIRE_HOURS` | 否 | `24` | 登录令牌有效期 |
 | `CONFIG_ENCRYPT_KEY` | 是 | - | 敏感字段加密密钥，至少 16 字符；**丢失不可恢复** |
@@ -158,8 +160,9 @@ docker compose logs -f backend
 | `LOG_LEVEL` | 否 | `info` | debug / info / warn / error |
 | `RELAY_LOG_RAW_EVENTS` | 否 | `false` | DEBUG 日志是否输出明文事件/JSON Body（含 PII），仅临时排查开启 |
 
-> `init.sql` 由 MySQL 容器首次初始化时自动在 `MYSQL_DATABASE`（即 `DB_NAME`）中执行；即使修改了 `DB_NAME`，后端启动时的 AutoMigrate 也会自动补齐全部业务表。
-> compose 按需求文档使用 root 连接 MySQL。如需最小权限，可额外设置 `MYSQL_USER` / `MYSQL_PASSWORD` 并将后端 `DB_USER` / `DB_PASSWORD` 改为该账号。
+> `init.sql` 由 MySQL 容器首次初始化时自动在 `MYSQL_DATABASE`（即 `MYSQL_DB_NAME`）中执行；即使修改了 `MYSQL_DB_NAME`，后端启动时的 AutoMigrate 也会自动补齐全部业务表。
+> compose 默认使用 `MYSQL_USER=root` 作为后端连接用户（不会作为 MySQL 容器的 `MYSQL_USER`，因为官方镜像不允许 `MYSQL_USER=root`）。如需非 root 账号，请先在 MySQL 中手动创建并授权，再把 `MYSQL_USER` / `MYSQL_PASSWORD` 改为该账号。
+> 直接运行后端（非 compose）时使用 `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` 和 `SERVER_PORT`；compose 会自动从上面的 `MYSQL_*` / `BACKEND_PORT` 映射。
 
 ## 本地开发
 

@@ -4,19 +4,22 @@ services:
     container_name: wecom-relay-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${DB_NAME:-wecom_relay}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}        # root 密码来自 MYSQL_PASSWORD
+      MYSQL_DATABASE: ${MYSQL_DB_NAME:-wecom_relay}
+      MYSQL_TCP_PORT: "${MYSQL_TCP_PORT:-3306}"
       TZ: Asia/Shanghai
+      # 注意：不要加 MYSQL_USER=root，否则 mysql 镜像启动会失败
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
     volumes:
       - mysql_data:/var/lib/mysql
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    ports:
-      - "${MYSQL_PORT:-3306}:3306"
+    # 不暴露宿主机端口，仅 Docker 内部网络访问
+    #ports:
+    #  - "${MYSQL_PORT:-3306}:3306"
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -P\"$$MYSQL_TCP_PORT\" -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -34,15 +37,16 @@ services:
       mysql:
         condition: service_healthy
     environment:
-      SERVER_PORT: "8888"
+      # 容器内部端口，必须与 web/nginx.conf 中的 proxy_pass 8888 保持一致
+      SERVER_PORT: "${BACKEND_PORT:-8888}"
       GIN_MODE: release
       LOG_LEVEL: ${LOG_LEVEL:-info}
       RELAY_LOG_RAW_EVENTS: ${RELAY_LOG_RAW_EVENTS:-false}
       DB_HOST: mysql
-      DB_PORT: "3306"
-      DB_USER: root
-      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      DB_NAME: ${DB_NAME:-wecom_relay}
+      DB_PORT: "${MYSQL_TCP_PORT:-3306}"
+      DB_NAME: ${MYSQL_DB_NAME:-wecom_relay}
+      DB_USER: "${MYSQL_USER:-root}"
+      DB_PASSWORD: ${MYSQL_PASSWORD}
       JWT_SECRET: ${JWT_SECRET}
       JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS:-24}
       CONFIG_ENCRYPT_KEY: ${CONFIG_ENCRYPT_KEY}
@@ -54,8 +58,9 @@ services:
       CALLBACK_MAX_SKEW_SECONDS: ${CALLBACK_MAX_SKEW_SECONDS:-300}
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-*}
       TZ: Asia/Shanghai
-    ports:
-      - "${BACKEND_PORT:-8888}:8888"
+    # 不暴露宿主机端口，仅 frontend（Nginx）通过服务名访问
+    #ports:
+    #  - "${BACKEND_PORT:-8888}:8888"
     logging:
       driver: json-file
       options:
