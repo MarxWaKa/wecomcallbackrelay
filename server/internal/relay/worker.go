@@ -22,17 +22,18 @@ const (
 
 // Worker 轮询 relay_tasks 并异步投递。
 type Worker struct {
-	db          *gorm.DB
-	cipher      *security.Cipher
-	sender      *Sender
-	logger      *slog.Logger
-	interval    time.Duration
-	concurrency int
-	backoff     []time.Duration
-	wg          sync.WaitGroup
+	db           *gorm.DB
+	cipher       *security.Cipher
+	sender       *Sender
+	logger       *slog.Logger
+	interval     time.Duration
+	concurrency  int
+	backoff      []time.Duration
+	logRawEvents bool
+	wg           sync.WaitGroup
 }
 
-func NewWorker(db *gorm.DB, cipher *security.Cipher, sender *Sender, logger *slog.Logger, interval time.Duration, concurrency int, backoff []time.Duration) *Worker {
+func NewWorker(db *gorm.DB, cipher *security.Cipher, sender *Sender, logger *slog.Logger, interval time.Duration, concurrency int, backoff []time.Duration, logRawEvents bool) *Worker {
 	if concurrency < 1 {
 		concurrency = 1
 	}
@@ -40,13 +41,14 @@ func NewWorker(db *gorm.DB, cipher *security.Cipher, sender *Sender, logger *slo
 		interval = 2 * time.Second
 	}
 	return &Worker{
-		db:          db,
-		cipher:      cipher,
-		sender:      sender,
-		logger:      logger,
-		interval:    interval,
-		concurrency: concurrency,
-		backoff:     backoff,
+		db:           db,
+		cipher:       cipher,
+		sender:       sender,
+		logger:       logger,
+		interval:     interval,
+		concurrency:  concurrency,
+		backoff:      backoff,
+		logRawEvents: logRawEvents,
 	}
 }
 
@@ -221,15 +223,20 @@ func (w *Worker) processTask(ctx context.Context, taskID uint64) {
 		}
 
 		if task.ForwardMode == model.ForwardModeWecomXML {
-			w.logger.Debug("企微兼容模式投递载荷",
+			attrs := []any{
 				"event_id", task.EventID,
 				"consumer_id", consumer.ID,
 				"consumer", consumer.Name,
 				"agent_id", agentID,
 				"corp_id", consumer.WecomCorpID,
 				"key_fingerprint", security.KeyFingerprint(wecomToken, wecomAESKey),
-				"raw_xml", task.RawXML,
-			)
+				"raw_xml_len", len(task.RawXML),
+				"raw_xml_sha256", security.ContentHash([]byte(task.RawXML)),
+			}
+			if w.logRawEvents {
+				attrs = append(attrs, "raw_xml", task.RawXML)
+			}
+			w.logger.Debug("企微兼容模式投递载荷", attrs...)
 		}
 
 		statusCode, elapsed, err = w.sender.Deliver(ctx, target, payload)

@@ -37,6 +37,7 @@ services:
       SERVER_PORT: "8888"
       GIN_MODE: release
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      RELAY_LOG_RAW_EVENTS: ${RELAY_LOG_RAW_EVENTS:-false}
       DB_HOST: mysql
       DB_PORT: "3306"
       DB_USER: root

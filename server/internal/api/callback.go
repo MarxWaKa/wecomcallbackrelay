@@ -19,14 +19,21 @@ import (
 
 // CallbackHandler 处理企微 GET 验证与 POST 事件回调。
 type CallbackHandler struct {
-	db      *gorm.DB
-	cipher  *security.Cipher
-	logger  *slog.Logger
-	maxSkew time.Duration
+	db           *gorm.DB
+	cipher       *security.Cipher
+	logger       *slog.Logger
+	maxSkew      time.Duration
+	logRawEvents bool
 }
 
-func NewCallbackHandler(db *gorm.DB, cipher *security.Cipher, logger *slog.Logger, maxSkew time.Duration) *CallbackHandler {
-	return &CallbackHandler{db: db, cipher: cipher, logger: logger, maxSkew: maxSkew}
+func NewCallbackHandler(db *gorm.DB, cipher *security.Cipher, logger *slog.Logger, maxSkew time.Duration, logRawEvents bool) *CallbackHandler {
+	return &CallbackHandler{
+		db:           db,
+		cipher:       cipher,
+		logger:       logger,
+		maxSkew:      maxSkew,
+		logRawEvents: logRawEvents,
+	}
 }
 
 // Verify 处理企微回调地址验证（GET）。
@@ -131,7 +138,15 @@ func (h *CallbackHandler) Receive(c *gin.Context) {
 		corpID = msg.ToUserName
 	}
 	eventID := wecom.MakeEventID(msg, plain)
-	h.logger.Debug("企微回调解密明文", "event_id", eventID, "plain", plain)
+	plainAttrs := []any{
+		"event_id", eventID,
+		"plain_len", len(plain),
+		"plain_sha256", security.ContentHash([]byte(plain)),
+	}
+	if h.logRawEvents {
+		plainAttrs = append(plainAttrs, "plain", plain)
+	}
+	h.logger.Debug("企微回调解密明文", plainAttrs...)
 	if msg.ToUserName != "" && cfg.CorpID != "" && msg.ToUserName != cfg.CorpID {
 		h.logger.Warn("回调 ToUserName 与配置 CorpID 不一致",
 			"event_id", eventID,

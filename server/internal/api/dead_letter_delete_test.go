@@ -40,7 +40,7 @@ func newDeadLetterDeleteFixture(t *testing.T) (*gin.Engine, *gorm.DB) {
 		t.Fatalf("创建加密器失败: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	handler := NewDeadLetterHandler(db, cipher, relay.NewSender(logger), logger)
+	handler := NewDeadLetterHandler(db, cipher, relay.NewSender(logger, false), logger)
 
 	engine := gin.New()
 	engine.DELETE("/dead-letters/:id", handler.Delete)

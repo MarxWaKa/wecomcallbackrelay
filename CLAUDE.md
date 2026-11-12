@@ -77,7 +77,7 @@ docker compose logs -f backend
 
 1. **企微加解密优先用官方库**：`internal/wecom/crypt.go` 的 `NewCrypto` 内部创建 `github.com/sbzhu/weworkapi_golang/wxbizmsgcrypt`（XML 版），生产链路的 `VerifyURL` / `DecryptMsg` / `EncryptMsg` 全部委托官方库；不要改回手写 AES。`Crypto.Signature`、`IsTimestampValid` 仅用于出站签名/诊断/时间窗口。`TestDecryptOfficialTestVector` 使用官方文档 91144 的固定向量，修改后必须跑 `go test ./internal/wecom -v`。
 2. **event_id 幂等**：`MakeEventID` 优先用 `evt_<MsgId>`，无 MsgId 时用明文 SHA1；不要改成随机值，否则企微重复投递会产生重复任务。
-3. **敏感字段**全部经 `security.Cipher` AES-256-GCM 加密（`enc:v1:` 前缀）。Handler 返回前必须脱敏；更新时 `""` 或 `"******"` 表示保留原值。日志中禁止输出明文密钥与请求体。
+3. **敏感字段**全部经 `security.Cipher` AES-256-GCM 加密（`enc:v1:` 前缀）。Handler 返回前必须脱敏；更新时 `""` 或 `"******"` 表示保留原值。日志中禁止输出明文密钥与请求体。DEBUG 日志默认只输出明文载荷的长度/哈希；只有 `RELAY_LOG_RAW_EVENTS=true`（默认 false，含 PII）才输出明文 XML/JSON Body。
 4. **布尔字段默认值**：`AdminUser.Enabled`、`Consumer.Enabled` 的 GORM tag 故意没有 `default:true`，否则 GORM 会忽略 `false` 的零值，导致无法创建禁用账号/消费端。新增带默认值的字段时注意同类问题。
 5. **响应优先**：不要在前台请求路径做任何转发或外部 HTTP 调用；事件只入库，转发由 Worker 完成。
 6. **重试语义**：`max_retry=5` 表示最多 5 次重试（初始投递 + 5 次重试），第 6 次失败才转死信。退避由 `RETRY_BACKOFF_SECONDS` 配置（默认 `1,2,4,8,16`），`relay.BackoffFor` 在序列耗尽后使用最后一个值；固定 30 分钟填 `1800`。`relay.Backoff` 是默认策略。

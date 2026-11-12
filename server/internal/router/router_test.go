@@ -65,7 +65,7 @@ func newRouteFixture(t *testing.T) *routeFixture {
 		DB:     db,
 		Cipher: cipher,
 		JWT:    jwtManager,
-		Sender: relay.NewSender(logger),
+		Sender: relay.NewSender(logger, false),
 		Logger: logger,
 	})
 	if err != nil {

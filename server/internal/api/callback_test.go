@@ -79,7 +79,7 @@ func newCallbackFixture(t *testing.T) *callbackFixture {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	handler := NewCallbackHandler(db, cipher, logger, 300*time.Second)
+	handler := NewCallbackHandler(db, cipher, logger, 300*time.Second, false)
 	engine := gin.New()
 	engine.GET("/wecom/callback", handler.Verify)
 	engine.POST("/wecom/callback", handler.Receive)

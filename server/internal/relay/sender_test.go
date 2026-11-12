@@ -20,7 +20,7 @@ import (
 )
 
 func testSender() *Sender {
-	return NewSender(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewSender(slog.New(slog.NewTextHandler(io.Discard, nil)), false)
 }
 
 func newAESKey(t *testing.T) string {

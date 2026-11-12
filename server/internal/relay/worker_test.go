@@ -42,7 +42,7 @@ func newWorkerFixture(t *testing.T) *workerFixture {
 		t.Fatalf("创建加密器失败: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	worker := NewWorker(db, cipher, NewSender(logger), logger, time.Second, 2, nil)
+	worker := NewWorker(db, cipher, NewSender(logger, false), logger, time.Second, 2, nil, false)
 	return &workerFixture{db: db, worker: worker, cipher: cipher}
 }
 

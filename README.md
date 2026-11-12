@@ -156,6 +156,7 @@ docker compose logs -f backend
 | `CALLBACK_MAX_SKEW_SECONDS` | 否 | `300` | 入站时间戳允许偏差 |
 | `CORS_ALLOW_ORIGINS` | 否 | `*` | 管理 API 跨域白名单，逗号分隔 |
 | `LOG_LEVEL` | 否 | `info` | debug / info / warn / error |
+| `RELAY_LOG_RAW_EVENTS` | 否 | `false` | DEBUG 日志是否输出明文事件/JSON Body（含 PII），仅临时排查开启 |
 
 > `init.sql` 由 MySQL 容器首次初始化时自动在 `MYSQL_DATABASE`（即 `DB_NAME`）中执行；即使修改了 `DB_NAME`，后端启动时的 AutoMigrate 也会自动补齐全部业务表。
 > compose 按需求文档使用 root 连接 MySQL。如需最小权限，可额外设置 `MYSQL_USER` / `MYSQL_PASSWORD` 并将后端 `DB_USER` / `DB_PASSWORD` 改为该账号。
@@ -360,12 +361,14 @@ JSON `payload` 中对应的键：
    docker compose logs -f backend | grep -E "企微回调入站请求|企微回调解密明文|企微兼容模式投递载荷|企微兼容模式出站请求|企微原样透传载荷|企微原样透传出站请求|JSON 模式出站请求"
    ```
 4. 重点对比：
-   - 入站：`query`、`body`、`to_user_name`、`agent_id`、`encrypt_len`
-   - 解密明文：`plain`
-   - 出站：`url`、`timestamp`、`nonce`、`msg_signature`、`body`
-5. 排查完成后将 `LOG_LEVEL` 改回 `info` 并重启。
+   - 入站：`query`、`body`（密文）、`to_user_name`、`agent_id`、`encrypt_len`
+   - 解密明文：默认只有 `plain_len`/`plain_sha256`；需要原文时设置 `RELAY_LOG_RAW_EVENTS=true`
+   - 出站：`url`、`timestamp`、`nonce`、`msg_signature`、`body`（密文）
+5. 排查完成后将 `LOG_LEVEL` 改回 `info`，并确保 `RELAY_LOG_RAW_EVENTS=false`。
 
-> DEBUG 日志包含密文、签名以及事件明文中的 `user_id`/`department` 等字段，但**不包含 Token、EncodingAESKey、Secret**。仅用于临时排查，不要在公网长期开启。
+> - 默认 DEBUG 日志只输出长度/哈希，不落地明文 PII。
+> - `RELAY_LOG_RAW_EVENTS=true` 后才会输出解密后的明文 XML、JSON Body、raw_xml，其中包含 `user_id`/`department` 等 PII；仅限临时排查，排查完必须关闭。
+> - 任何情况下都不会输出 Token、EncodingAESKey、Secret。
 
 - **自动重试**：默认按 1/2/4/8/16 秒退避；可通过 `RETRY_BACKOFF_SECONDS` 配置，序列耗尽后使用最后一个值。
   - 固定每 30 分钟重试一次：`RETRY_BACKOFF_SECONDS=1800`。

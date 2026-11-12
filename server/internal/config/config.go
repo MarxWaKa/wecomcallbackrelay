@@ -28,6 +28,7 @@ type Config struct {
 	ServerPort        string
 	GinMode           string
 	LogLevel          string
+	LogRawEvents      bool
 	DB                DBConfig
 	JWTSecret         string
 	JWTExpire         time.Duration
@@ -44,9 +45,10 @@ type Config struct {
 // Load 读取并校验环境变量配置。
 func Load() (*Config, error) {
 	c := &Config{
-		ServerPort: env("SERVER_PORT", "8888"),
-		GinMode:    env("GIN_MODE", "release"),
-		LogLevel:   env("LOG_LEVEL", "info"),
+		ServerPort:   env("SERVER_PORT", "8888"),
+		GinMode:      env("GIN_MODE", "release"),
+		LogLevel:     env("LOG_LEVEL", "info"),
+		LogRawEvents: envBool("RELAY_LOG_RAW_EVENTS", false),
 		DB: DBConfig{
 			Host:     env("DB_HOST", "127.0.0.1"),
 			Port:     env("DB_PORT", "3306"),
@@ -105,6 +107,18 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	v, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return fallback
+	}
+	return v
+}
+
+func envBool(key string, fallback bool) bool {
+	raw, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return fallback
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
 	if err != nil {
 		return fallback
 	}

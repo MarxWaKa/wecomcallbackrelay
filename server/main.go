@@ -65,8 +65,8 @@ func run() error {
 	}
 	logKeyFingerprints(db, cipher, logger)
 	jwtManager := security.NewJWTManager(cfg.JWTSecret, cfg.JWTExpire)
-	sender := relay.NewSender(logger)
-	worker := relay.NewWorker(db, cipher, sender, logger, cfg.WorkerInterval, cfg.WorkerConcurrency, cfg.RetryBackoff)
+	sender := relay.NewSender(logger, cfg.LogRawEvents)
+	worker := relay.NewWorker(db, cipher, sender, logger, cfg.WorkerInterval, cfg.WorkerConcurrency, cfg.RetryBackoff, cfg.LogRawEvents)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

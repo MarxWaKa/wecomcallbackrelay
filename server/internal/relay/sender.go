@@ -47,13 +47,15 @@ type Payload struct {
 
 // Sender 负责按转发模式构造并发送出站请求。
 type Sender struct {
-	transport *http.Transport
-	logger    *slog.Logger
+	transport    *http.Transport
+	logger       *slog.Logger
+	logRawEvents bool
 }
 
-func NewSender(logger *slog.Logger) *Sender {
+func NewSender(logger *slog.Logger, logRawEvents bool) *Sender {
 	return &Sender{
-		logger: logger,
+		logger:       logger,
+		logRawEvents: logRawEvents,
 		transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
@@ -210,15 +212,19 @@ func (s *Sender) buildRequest(ctx context.Context, target Target, payload Payloa
 	if err != nil {
 		return nil, fmt.Errorf("构造请求失败: %w", err)
 	}
-	s.logger.Debug("JSON 模式出站请求",
+	attrs := []any{
 		"consumer_id", target.ConsumerID,
 		"consumer", target.Name,
 		"event_id", payload.EventID,
 		"url", callbackURL.String(),
 		"auth_type", target.AuthType,
 		"body_len", len(body),
-		"body", string(body),
-	)
+		"body_sha256", security.ContentHash(body),
+	}
+	if s.logRawEvents {
+		attrs = append(attrs, "body", string(body))
+	}
+	s.logger.Debug("JSON 模式出站请求", attrs...)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("User-Agent", "wecom-callback-relay/1.0")
 	req.Header.Set("X-Event-Id", payload.EventID)

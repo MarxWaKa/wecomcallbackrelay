@@ -55,7 +55,7 @@ func New(deps Dependencies) (*gin.Engine, error) {
 	deadLetterHandler := api.NewDeadLetterHandler(deps.DB, deps.Cipher, deps.Sender, deps.Logger)
 	dashboardHandler := api.NewDashboardHandler(deps.DB)
 	auditHandler := api.NewAuditHandler(deps.DB)
-	callbackHandler := api.NewCallbackHandler(deps.DB, deps.Cipher, deps.Logger, deps.Config.CallbackMaxSkew)
+	callbackHandler := api.NewCallbackHandler(deps.DB, deps.Cipher, deps.Logger, deps.Config.CallbackMaxSkew, deps.Config.LogRawEvents)
 
 	engine := gin.New()
 	engine.Use(middleware.Recovery(deps.Logger), middleware.RequestLogger(deps.Logger), middleware.CORS(deps.Config.CORSOrigins))
