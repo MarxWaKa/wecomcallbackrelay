@@ -96,13 +96,18 @@ const serverTime = ref('-')
 const summary = reactive({
   consumers: { total: 0, enabled: 0 },
   tasks: { pending: 0, success_today: 0, dead_today: 0 },
-  dead_letters: { pending: 0, replaying: 0 }
+  dead_letters: { pending: 0, replaying: 0 },
+  quick_start: { has_inbound: false, has_success: false }
 })
 
+// el-steps 的 active 表示当前进行到第几步（0-based）：
+// active=4 时 4 个步骤都已完成并显示对号。
 const stepActive = computed(() => {
   if (!wecomConfigured.value) return 0
   if (summary.consumers.enabled === 0) return 1
-  return 3
+  if (!summary.quick_start.has_inbound) return 2
+  if (!summary.quick_start.has_success) return 3
+  return 4
 })
 
 async function load() {
@@ -112,7 +117,8 @@ async function load() {
     Object.assign(summary, {
       consumers: data.consumers,
       tasks: data.tasks,
-      dead_letters: data.dead_letters
+      dead_letters: data.dead_letters,
+      quick_start: data.quick_start || { has_inbound: false, has_success: false }
     })
     serverTime.value = new Date(data.server_time).toLocaleString()
     const configs = await listWecomConfigs()

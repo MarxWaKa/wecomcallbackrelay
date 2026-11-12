@@ -36,6 +36,11 @@ func (h *DashboardHandler) Summary(c *gin.Context) {
 	h.db.Model(&model.DeadLetter{}).Where("status = ?", model.DeadStatusPending).Count(&deadPending)
 	h.db.Model(&model.DeadLetter{}).Where("status = ?", model.DeadStatusReplaying).Count(&deadReplaying)
 
+	// 快速开始引导状态：是否收到过入站事件、是否已有成功投递。
+	var taskTotal, taskSuccess int64
+	h.db.Model(&model.RelayTask{}).Count(&taskTotal)
+	h.db.Model(&model.RelayTask{}).Where("status = ?", model.TaskStatusSuccess).Count(&taskSuccess)
+
 	OK(c, gin.H{
 		"consumers": gin.H{
 			"total":   consumerTotal,
@@ -49,6 +54,10 @@ func (h *DashboardHandler) Summary(c *gin.Context) {
 		"dead_letters": gin.H{
 			"pending":   deadPending,
 			"replaying": deadReplaying,
+		},
+		"quick_start": gin.H{
+			"has_inbound": taskTotal > 0,
+			"has_success": taskSuccess > 0,
 		},
 		"server_time": now,
 	})
