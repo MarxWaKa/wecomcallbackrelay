@@ -68,6 +68,8 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+    environment:
+      TZ: Asia/Shanghai
     ports:
       - "${FRONTEND_PORT:-8889}:80"
     logging:
