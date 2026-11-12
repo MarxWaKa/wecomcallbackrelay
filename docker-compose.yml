@@ -1,0 +1,80 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: wecom-relay-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME:-wecom_relay}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  backend:
+    build: ./server
+    container_name: wecom-relay-backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: "8888"
+      GIN_MODE: release
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: root
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      DB_NAME: ${DB_NAME:-wecom_relay}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS:-24}
+      CONFIG_ENCRYPT_KEY: ${CONFIG_ENCRYPT_KEY}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      WORKER_INTERVAL_SECONDS: ${WORKER_INTERVAL_SECONDS:-2}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-8}
+      RETRY_BACKOFF_SECONDS: "${RETRY_BACKOFF_SECONDS:-1,2,4,8,16}"
+      CALLBACK_MAX_SKEW_SECONDS: ${CALLBACK_MAX_SKEW_SECONDS:-300}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-*}
+      TZ: Asia/Shanghai
+    ports:
+      - "${BACKEND_PORT:-8888}:8888"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+        compress: "true"
+
+  frontend:
+    build: ./web
+    container_name: wecom-relay-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-8889}:80"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+volumes:
+  mysql_data:
