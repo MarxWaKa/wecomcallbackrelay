@@ -148,31 +148,31 @@ func TestInvalidEncodingAESKey(t *testing.T) {
 	}
 }
 
-// TestDecryptOfficialTestVector 使用企业微信官方文档《加解密方案说明》中的固定测试向量，
-// 验证签名与解密结果与官方实现一致。
-// https://developer.work.weixin.qq.com/document/path/91144
-func TestDecryptOfficialTestVector(t *testing.T) {
+// TestDecryptCrossImplementationVector 使用独立 Node.js 实现按企微官方算法
+// （AES-256-CBC、PKCS#7 32 字节块、16B random + 4B length + msg + receiveId）
+// 生成的固定向量，交叉验证签名与解密；不包含任何真实或官方示例 ID。
+func TestDecryptCrossImplementationVector(t *testing.T) {
 	const (
-		corpID     = "wx5823bf96d3bd56c7"
-		token      = "QDG6eK"
-		aesKey     = "jWmYm7qr5nMoAUwZRjGtBxmz3KA1tkAj3ykkR6q2B2C"
-		signature  = "477715d11cdb4164915debcba66cb864d751f3e6"
+		corpID     = "ww-test-corp"
+		token      = "test-token"
+		aesKey     = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+		signature  = "53a4092ca51bdb41fb4128f48ee02039e439416a"
 		timestamp  = "1409659813"
 		nonce      = "1372623149"
-		encryptMsg = "RypEvHKD8QQKFhvQ6QleEB4J58tiPdvo+rtK1I9qca6aM/wvqnLSV5zEPeusUiX5L5X/0lWfrf0QADHHhGd3QczcdCUpj911L3vg3W/sYYvuJTs3TUUkSUXxaccAS0qhxchrRYt66wiSpGLYL42aM6A8dTT+6k4aSknmPj48kzJs8qLjvd4Xgpue06DOdnLxAUHzM6+kDZ+HMZfJYuR+LtwGc2hgf5gsijff0ekUNXZiqATP7PF5mZxZ3Izoun1s4zG4LUMnvw2r+KqCKIw+3IQH03v+BCA9nMELNqbSf6tiWSrXJB3LAVGUcallcrw8V2t9EL4EhzJWrQUax5wLVMNS0+rUPA3k22Ncx4XXZS9o0MBH27Bo6BpNelZpS+/uh9KsNlY6bHCmJU9p8g7m3fVKn28H3KDYA5Pl/T8Z1ptDAVe0lXdQ2YoyyH2uyPIGHBZZIs2pDBS8R07+qN+E7Q=="
+		encryptMsg = "4j/AuRx71kQlxVlzbpsMWHFMAsfhXznmO5TH0Yo/UB0TVHEHSw9bRvBFLrnCwvFC4m5F2Wy+0xbeiBnoP1OZUtZ/vfY4DIQhYAie3jrW+abLTnS1aSvncyGdeQYcR6yRQ6QYJfNo/ynXngzKA7C74jh2tBNIuLUOBK2EfvdYN9MCEOWJCjCQedYbMp3h3GqBle4eCEqxY4BhAVmfyPCgGrtMyDOQhRPu1r/Gs4CTjxJoifNfFJ1j5ZZgrACSdjHyJcxRdIb2MYdCTXQoOVt0Hv9NSRB7779JceAmOSpxo8dJyrJce2sOf22PARbXnDpiAqKWOzcJhEkW22DofXb0E6fk4ipY/6zrBRv1oElU2pxq5E7dhYPlqDteQILmlohpkEDuySCL91UrC6vcs/E8y7I7etsD0jCE182aLK2rips="
 	)
 
 	crypt, err := NewCrypto(token, aesKey, corpID)
 	if err != nil {
-		t.Fatalf("创建官方测试向量 Crypto 失败: %v", err)
+		t.Fatalf("创建交叉验证向量 Crypto 失败: %v", err)
 	}
 	if !crypt.VerifySignature(signature, timestamp, nonce, encryptMsg) {
-		t.Fatal("官方测试向量签名校验失败")
+		t.Fatal("交叉验证向量签名校验失败")
 	}
 
 	plain, err := crypt.Decrypt(encryptMsg)
 	if err != nil {
-		t.Fatalf("官方测试向量解密失败: %v", err)
+		t.Fatalf("交叉验证向量解密失败: %v", err)
 	}
 
 	var msg struct {
@@ -185,12 +185,12 @@ func TestDecryptOfficialTestVector(t *testing.T) {
 		AgentID      string `xml:"AgentID"`
 	}
 	if err := xml.Unmarshal([]byte(plain), &msg); err != nil {
-		t.Fatalf("官方测试向量明文 XML 解析失败: %v\n%s", err, plain)
+		t.Fatalf("交叉验证向量明文 XML 解析失败: %v\n%s", err, plain)
 	}
 	if msg.ToUserName != corpID || msg.FromUserName != "mycreate" ||
 		msg.CreateTime != 1409659813 || msg.MsgType != "text" ||
 		msg.Content != "hello" || msg.MsgID != "4561255354251345929" || msg.AgentID != "218" {
-		t.Fatalf("官方测试向量解密结果不匹配: %+v", msg)
+		t.Fatalf("交叉验证向量解密结果不匹配: %+v", msg)
 	}
 }
 

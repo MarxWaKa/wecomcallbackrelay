@@ -208,7 +208,7 @@ go vet ./...
 测试覆盖：
 
 - 官方 Go 加解密库（`github.com/sbzhu/weworkapi_golang/wxbizmsgcrypt`）的 `VerifyURL` / `DecryptMsg` / `EncryptMsg`。
-- 企业微信官方固定测试向量（路径 91144）：签名校验与解密结果逐字段比对通过。
+- 独立实现交叉验证向量：签名校验与解密结果逐字段比对通过（不含真实/官方示例 ID）。
 - XML → JSON 映射（成员 / 部门 / 标签 / 异步任务事件）、稳定 event_id。
 - JSON 模式 none/bearer/HMAC 认证、企微兼容模式端到端验签解密、原样透传 Body/Query 一致性、非 2xx 错误。
 - 回调 GET 验证、POST 入库、重复 MsgId 幂等、坏签名/过期时间戳 403、明文解析失败返回 200。
@@ -404,7 +404,7 @@ JSON `payload` 中对应的键：
 | 系统表 | gin-vue-admin 初始化 SQL | 仅业务表，`init.sql` + AutoMigrate |
 | 初始管理员 | 初始化 SQL | 首次启动按环境变量创建 |
 | 字段加密算法 | AES | AES-256-GCM（密钥经 SHA-256 派生） |
-| 企微官方库 | 使用官方加解密库 | 使用企业微信官方 Golang 示例库 `github.com/sbzhu/weworkapi_golang/wxbizmsgcrypt`（XML 版），`VerifyURL`/`DecryptMsg`/`EncryptMsg` 均委托官方库；另有官方固定测试向量 |
+| 企微官方库 | 使用官方加解密库 | 使用企业微信官方 Golang 示例库 `github.com/sbzhu/weworkapi_golang/wxbizmsgcrypt`（XML 版），`VerifyURL`/`DecryptMsg`/`EncryptMsg` 均委托官方库；另有独立实现交叉验证向量 |
 | 转发模式 | json / wecom_xml | 增加 `wecom_proxy` 原样透传（消费端与「企微参数」共享同一套密钥时使用） |
 | 死信删除 | 未定义 | 增加单条/批量永久删除（批量 ≤100，`replaying` 跳过） |
 | 任务状态 | pending/success/failed/dead | 增加 `sending`（Worker 抢占中）以保证多实例不重复投递；透传模式额外快照原始加密 Body/Query |
