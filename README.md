@@ -86,7 +86,7 @@
 
 ```bash
 cp .env.example .env
-# 修改 .env：MYSQL_PASSWORD、JWT_SECRET、CONFIG_ENCRYPT_KEY、ADMIN_PASSWORD
+# 修改 .env：MYSQL_ROOT_PASSWORD、JWT_SECRET、CONFIG_ENCRYPT_KEY、ADMIN_PASSWORD
 vim .env
 
 docker compose up -d --build
@@ -142,7 +142,7 @@ docker compose logs -f backend
 
 | 环境变量 | 必填 | 默认值 | 说明 |
 | :--- | :---: | :--- | :--- |
-| `MYSQL_PASSWORD` | 是 | - | MySQL root 密码（compose 注入为 `MYSQL_ROOT_PASSWORD`） |
+| `MYSQL_ROOT_PASSWORD` | 是 | - | MySQL root 密码（直接注入容器，并作为后端 `DB_PASSWORD`） |
 | `MYSQL_USER` | 否 | `root` | 后端连接 MySQL 的用户（只传给 backend 的 `DB_USER`，非 root 账号需手动创建） |
 | `MYSQL_TCP_PORT` | 否 | `3306` | MySQL 容器端口 / 后端 `DB_PORT` |
 | `MYSQL_DB_NAME` | 否 | `wecom_relay` | 数据库名 |
@@ -161,7 +161,7 @@ docker compose logs -f backend
 | `RELAY_LOG_RAW_EVENTS` | 否 | `false` | DEBUG 日志是否输出明文事件/JSON Body（含 PII），仅临时排查开启 |
 
 > `init.sql` 由 MySQL 容器首次初始化时自动在 `MYSQL_DATABASE`（即 `MYSQL_DB_NAME`）中执行；即使修改了 `MYSQL_DB_NAME`，后端启动时的 AutoMigrate 也会自动补齐全部业务表。
-> compose 默认使用 `MYSQL_USER=root` 作为后端连接用户（不会作为 MySQL 容器的 `MYSQL_USER`，因为官方镜像不允许 `MYSQL_USER=root`）。如需非 root 账号，请先在 MySQL 中手动创建并授权，再把 `MYSQL_USER` / `MYSQL_PASSWORD` 改为该账号。
+> compose 默认使用 `MYSQL_USER=root` 和 `MYSQL_ROOT_PASSWORD` 作为后端连接 MySQL 的账号密码（`MYSQL_USER` 不会作为 MySQL 容器的 `MYSQL_USER`，因为官方镜像不允许 `MYSQL_USER=root`）。如需非 root 账号，请先在 MySQL 中手动创建并授权，并在 compose 中为后端单独设置 `DB_USER` / `DB_PASSWORD`；`MYSQL_ROOT_PASSWORD` 仍用于 MySQL root 账号。
 > 直接运行后端（非 compose）时使用 `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` 和 `SERVER_PORT`；compose 会自动从上面的 `MYSQL_*` / `BACKEND_PORT` 映射。
 
 ## 本地开发
