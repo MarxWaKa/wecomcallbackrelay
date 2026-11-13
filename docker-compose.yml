@@ -37,7 +37,8 @@ services:
       mysql:
         condition: service_healthy
     environment:
-      # 容器内部端口，必须与 web/nginx.conf 中的 proxy_pass 8888 保持一致
+      # 容器内部端口，compose 将 BACKEND_PORT 映射为后端 SERVER_PORT。
+      # 修改 BACKEND_PORT 时必须同步修改 web/nginx.conf 的 backend:8888 并重建 frontend。
       SERVER_PORT: "${BACKEND_PORT:-8888}"
       GIN_MODE: release
       LOG_LEVEL: ${LOG_LEVEL:-info}

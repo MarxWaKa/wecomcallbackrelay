@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -8,7 +9,9 @@ import (
 
 	"github.com/casbin/casbin/v2"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
+	"wecomrelay/internal/model"
 	"wecomrelay/internal/security"
 )
 
@@ -74,8 +77,8 @@ func CORS(origins []string) gin.HandlerFunc {
 	}
 }
 
-// JWTAuth 校验管理端令牌并写入操作人上下文。
-func JWTAuth(manager *security.Manager) gin.HandlerFunc {
+// JWTAuth 校验管理端令牌、账号状态与令牌版本，并写入操作人上下文。
+func JWTAuth(manager *security.Manager, db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if !strings.HasPrefix(header, "Bearer ") {
@@ -87,9 +90,34 @@ func JWTAuth(manager *security.Manager) gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": err.Error()})
 			return
 		}
-		c.Set(ctxUserID, claims.UserID)
-		c.Set(ctxUsername, claims.Username)
-		c.Set(ctxRole, claims.Role)
+		if claims.UserID == 0 {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "令牌无效"})
+			return
+		}
+
+		var user model.AdminUser
+		if err := db.Select("id", "username", "role", "enabled", "token_version").
+			First(&user, claims.UserID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "账号不存在或已被删除"})
+				return
+			}
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 500, "msg": "校验登录状态失败"})
+			return
+		}
+		if !user.Enabled {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "账号已被禁用"})
+			return
+		}
+		if user.TokenVersion != claims.TokenVersion {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "登录状态已失效，请重新登录"})
+			return
+		}
+
+		// 角色/用户名以数据库为准，避免令牌中的旧角色继续生效。
+		c.Set(ctxUserID, user.ID)
+		c.Set(ctxUsername, user.Username)
+		c.Set(ctxRole, user.Role)
 		c.Next()
 	}
 }

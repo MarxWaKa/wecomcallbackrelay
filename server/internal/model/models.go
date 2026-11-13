@@ -52,6 +52,7 @@ type AdminUser struct {
 	Nickname     string     `gorm:"size:64" json:"nickname"`
 	Role         string     `gorm:"size:32;not null;default:admin" json:"role"`
 	Enabled      bool       `gorm:"not null" json:"enabled"`
+	TokenVersion int64      `gorm:"not null;default:1" json:"-"`
 	LastLoginAt  *time.Time `json:"last_login_at"`
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`

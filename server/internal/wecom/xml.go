@@ -70,7 +70,11 @@ func ParseCallbackMessage(raw string) (*CallbackMessage, error) {
 	return &msg, nil
 }
 
-// MakeEventID 生成稳定的事件 ID：优先使用 MsgId，其次使用明文哈希，保证企微重试时幂等。
+// MakeEventID 生成稳定的事件 ID：优先使用 MsgId，其次使用 CreateTime + 明文哈希，
+// 保证企微重试时幂等。
+//
+// 注意：无 MsgId 时，同一秒内完全相同的明文会被视为同一事件。不要把 nonce/msg_signature
+// 纳入哈希来区分这类事件：企微重试可能重新生成这些参数，会导致 event_id 变化并产生重复投递。
 func MakeEventID(msg *CallbackMessage, rawXML string) string {
 	if msg.MsgID != "" {
 		id := "evt_" + msg.MsgID

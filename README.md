@@ -50,7 +50,7 @@
 
 - **响应优先**：入站解密后先入库，再立即回复企微；转发完全异步。
 - **配置与流量隔离**：`/wecom/callback` 走企微验签，`/api/*` 走 JWT + Casbin。
-- **快照机制**：任务创建时快照 `forward_mode`、`raw_xml`、`json_payload`；原样透传模式额外快照 `raw_encrypted_body` 与 `inbound_query`，重试与人工重推使用相同载荷。
+- **快照机制**：任务创建时快照 `forward_mode`、`raw_xml`、`json_payload`；原样透传模式额外快照 `raw_encrypted_body` 与 `inbound_query`。自动重试使用任务快照载荷；人工重推默认使用消费端最新 URL/鉴权/密钥，可通过 `use_snapshot` 显式使用死信快照。
 - **多实例安全**：Worker 使用 `SELECT ... FOR UPDATE SKIP LOCKED` 抢占任务。
 
 ## 目录结构
@@ -148,9 +148,9 @@ docker compose logs -f backend
 | `MYSQL_TCP_PORT` | 否 | `3306` | MySQL 容器端口 / 后端 `DB_PORT` |
 | `MYSQL_DB_NAME` | 否 | `wecom_relay` | 数据库名 |
 | `FRONTEND_PORT` | 否 | `8889` | 前端对外端口 |
-| `BACKEND_PORT` | 否 | `8888` | 后端容器内部端口；必须与 `web/nginx.conf` 的 8888 一致 |
+| `BACKEND_PORT` | 否 | `8888` | 后端容器内部端口，compose 会映射为后端 `SERVER_PORT`；`web/nginx.conf` 硬编码 `backend:8888`，修改时必须同步修改并重建 frontend |
 | `JWT_SECRET` | 是 | - | 至少 16 字符，建议 32+ 随机串 |
-| `JWT_EXPIRE_HOURS` | 否 | `24` | 登录令牌有效期 |
+| `JWT_EXPIRE_HOURS` | 否 | `24` | 登录令牌有效期；登出/改密/重置密码/禁用/角色变化会通过 `token_version` 立即吊销，不必等过期 |
 | `CONFIG_ENCRYPT_KEY` | 是 | - | 敏感字段加密密钥，至少 16 字符；**丢失不可恢复** |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 首次启动 | `admin` / - | 初始管理员；已有账号时不会覆盖 |
 | `WORKER_INTERVAL_SECONDS` | 否 | `2` | 任务轮询间隔 |
@@ -241,8 +241,8 @@ go vet ./...
 | PUT/DELETE | `/api/wecom-config/:id` | JWT+Casbin | 修改 / 删除 |
 | GET | `/api/dead-letters` | JWT+Casbin | 死信列表 |
 | GET | `/api/dead-letters/:id` | JWT+Casbin | 死信详情 |
-| POST | `/api/dead-letters/:id/replay` | JWT+Casbin | 单条重推 |
-| POST | `/api/dead-letters/replay-batch` | JWT+Casbin | 批量重推（≤50） |
+| POST | `/api/dead-letters/:id/replay` | JWT+Casbin | 单条重推；可选 `?use_snapshot=true` 使用死信快照 |
+| POST | `/api/dead-letters/replay-batch` | JWT+Casbin | 批量重推（≤50）；body 可带 `use_snapshot` |
 | PUT | `/api/dead-letters/:id/discard` | JWT+Casbin | 标记丢弃 |
 | DELETE | `/api/dead-letters/:id` | JWT+Casbin | 永久删除单条死信 |
 | POST | `/api/dead-letters/batch-delete` | JWT+Casbin | 批量永久删除（≤100） |
@@ -256,7 +256,7 @@ go vet ./...
 - `admin`：可读写全部管理接口。
 - `viewer`：仅可 GET；无法修改配置、重推死信或管理管理员。
 
-> 推送记录直接复用 `relay_tasks`：仅 `success`/`failed`/`dead` 可删除；`pending`/`sending` 单条删除返回 409，批量删除自动跳过。删除 `dead` 推送记录不会删除对应死信；死信人工重推结果不回写推送记录。
+> 推送记录直接复用 `relay_tasks`：仅 `success`/`failed`/`dead` 可删除；`pending`/`sending` 单条删除返回 409，批量删除自动跳过。删除 `dead` 推送记录不会删除对应死信；死信人工重推成功会在同一事务内把对应的 `relay_tasks`（`event_id + consumer_id` 且状态为 `dead`）回写为 `success`。
 
 ## 转发协议
 
@@ -387,6 +387,9 @@ JSON `payload` 中对应的键：
   - 累计重试次数超过消费端 `max_retry`（默认 5）后转死信。固定 30 分钟 + `max_retry=5` 时，约 2.5 小时后转死信。
   - 原样透传模式使用企微原始时间戳；如果消费端严格校验时间戳窗口，长时间后再重试可能超窗，建议此类消费端使用 `wecom_xml` 或关闭时间戳校验。
 - **人工重推**：仅 `pending` / `discarded` 可重推；`replaying` 返回 409 防连点；失败自动回退 `pending` 并记录错误；人工重推不计入自动重试次数。
+  - 默认使用消费端最新 URL / 鉴权 / 密钥 / 超时，转发模式与载荷仍使用死信快照。
+  - 消费端已删除或禁用时默认拒绝，可显式勾选“使用死信快照配置”（`use_snapshot=true`）按历史快照重推。
+  - 重推成功后在同一事务内把对应 `relay_tasks` 从 `dead` 回写为 `success`，并更新 HTTP 状态/耗时。
 - **永久删除**：支持单条删除与批量删除（单次 ≤100）；`replaying` 状态的死信会返回 409 / 批量时自动跳过；删除不可恢复，操作会写入审计日志。
 - **告警**：pending 死信超过 10 条或最老记录超过 1 小时，后端输出 ERROR 日志（每 10 分钟检查）。
 - **清理**：`resolved` 死信保留 30 天、`discarded` 保留 7 天；`success`/`failed`/`dead` 推送记录按 `PUSH_RECORD_RETENTION_DAYS` 保留（默认 30 天，`0` 永久保留），每日自动清理。
@@ -397,7 +400,8 @@ JSON `payload` 中对应的键：
 ## 安全说明
 
 - 敏感字段（`secret`、`token`、`encoding_aes_key`、`auth_config`、消费端兼容密钥）使用 AES-256-GCM 加密存储，密钥来自 `CONFIG_ENCRYPT_KEY`（SHA-256 派生）。
-- 管理接口全部 JWT + Casbin；登录接口除外。
+- 管理接口全部 JWT + Casbin；登录接口除外。JWT 每次请求都会回查 `admin_users` 的 `enabled`、`role` 与 `token_version`；登出、改密、重置密码、账号禁用/删除、角色变化会立即吊销旧令牌（登出为账号级，所有设备一起失效）。
+- 升级到包含 `token_version` 的版本后，升级前签发的旧 JWT 会全部失效，管理员需重新登录一次。
 - 入站时间戳窗口默认 300 秒；验签/解密失败返回 403 且不入库。
 - 企微兼容模式与原样透传模式都意味着中间件与消费端共享 Token/AESKey；如需密钥隔离，请使用 JSON 模式 + HMAC。
 - 生产环境请使用 HTTPS、强密码、限制 MySQL 端口暴露，并定期轮换管理员密码。
@@ -415,6 +419,7 @@ JSON `payload` 中对应的键：
 | 企微官方库 | 使用官方加解密库 | 使用企业微信官方 Golang 示例库 `github.com/sbzhu/weworkapi_golang/wxbizmsgcrypt`（XML 版），`VerifyURL`/`DecryptMsg`/`EncryptMsg` 均委托官方库；另有独立实现交叉验证向量 |
 | 转发模式 | json / wecom_xml | 增加 `wecom_proxy` 原样透传（消费端与「企微参数」共享同一套密钥时使用） |
 | 死信删除 | 未定义 | 增加单条/批量永久删除（批量 ≤100，`replaying` 跳过） |
+| 死信重推 | 按快照 `forward_mode` 构造，重推结果不回写任务 | 默认使用消费端最新 URL/鉴权/密钥，`use_snapshot` 可回退快照；成功后回写 `relay_tasks` 为 `success` |
 | 任务状态 | pending/success/failed/dead | 增加 `sending`（Worker 抢占中）以保证多实例不重复投递；透传模式额外快照原始加密 Body/Query |
 
 ## 常见问题

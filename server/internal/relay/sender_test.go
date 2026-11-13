@@ -23,6 +23,16 @@ func testSender() *Sender {
 	return NewSender(slog.New(slog.NewTextHandler(io.Discard, nil)), false)
 }
 
+func TestSenderTransportConnectionPool(t *testing.T) {
+	sender := testSender()
+	if sender.transport.MaxIdleConnsPerHost != 32 {
+		t.Fatalf("MaxIdleConnsPerHost 应为 32，实际 %d", sender.transport.MaxIdleConnsPerHost)
+	}
+	if sender.transport.MaxIdleConns != 100 {
+		t.Fatalf("MaxIdleConns 应为 100，实际 %d", sender.transport.MaxIdleConns)
+	}
+}
+
 func newAESKey(t *testing.T) string {
 	t.Helper()
 	key := make([]byte, 32)

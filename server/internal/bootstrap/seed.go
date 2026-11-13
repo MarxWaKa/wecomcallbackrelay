@@ -36,6 +36,7 @@ func SeedAdmin(db *gorm.DB, cfg *config.Config, logger *slog.Logger) error {
 		Nickname:     "超级管理员",
 		Role:         model.RoleAdmin,
 		Enabled:      true,
+		TokenVersion: 1,
 	}
 	if err := db.Create(&admin).Error; err != nil {
 		return fmt.Errorf("创建初始管理员失败: %w", err)

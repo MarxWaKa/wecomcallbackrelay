@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS `admin_users` (
   `nickname`      VARCHAR(64)  DEFAULT NULL,
   `role`          VARCHAR(32)  NOT NULL DEFAULT 'admin',
   `enabled`       TINYINT(1)   NOT NULL DEFAULT 1,
+  `token_version` BIGINT       NOT NULL DEFAULT 1,
   `last_login_at` DATETIME(3)  DEFAULT NULL,
   `created_at`    DATETIME(3)  DEFAULT NULL,
   `updated_at`    DATETIME(3)  DEFAULT NULL,

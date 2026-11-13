@@ -84,8 +84,13 @@ func (h *AuthHandler) UserInfo(c *gin.Context) {
 	OK(c, user)
 }
 
-// Logout 登出（JWT 无状态，客户端丢弃令牌即可）。
+// Logout 登出，并使该账号所有已签发令牌立即失效。
 func (h *AuthHandler) Logout(c *gin.Context) {
+	if err := bumpTokenVersion(h.db, middleware.UserID(c)); err != nil {
+		h.logger.Error("登出时吊销令牌失败", "admin_id", middleware.UserID(c), "error", err)
+		Fail(c, http.StatusInternalServerError, "退出登录失败，请稍后重试")
+		return
+	}
 	OK(c, gin.H{"message": "已退出登录"})
 }
 
@@ -119,7 +124,10 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		Fail(c, http.StatusInternalServerError, "密码加密失败")
 		return
 	}
-	if err := h.db.Model(&user).Update("password_hash", hash).Error; err != nil {
+	if err := h.db.Model(&user).Updates(map[string]any{
+		"password_hash": hash,
+		"token_version": gorm.Expr("token_version + 1"),
+	}).Error; err != nil {
 		Fail(c, http.StatusInternalServerError, "修改密码失败")
 		return
 	}

@@ -79,7 +79,7 @@ func New(deps Dependencies) (*gin.Engine, error) {
 	apiGroup.POST("/base/login", authHandler.Login)
 
 	secured := apiGroup.Group("")
-	secured.Use(middleware.JWTAuth(deps.JWT), middleware.CasbinAuth(enforcer))
+	secured.Use(middleware.JWTAuth(deps.JWT, deps.DB), middleware.CasbinAuth(enforcer))
 	{
 		base := secured.Group("/base")
 		base.GET("/user-info", authHandler.UserInfo)

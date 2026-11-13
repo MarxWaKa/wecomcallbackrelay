@@ -6,6 +6,9 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+
+	"wecomrelay/internal/model"
 )
 
 // parseID 解析路径中的无符号整数 ID。
@@ -44,4 +47,21 @@ func boolQuery(c *gin.Context, key string) (bool, bool) {
 		return false, false
 	}
 	return v, true
+}
+
+// bumpTokenVersion 递增管理员令牌版本，使该账号已签发的 JWT 立即失效。
+func bumpTokenVersion(db *gorm.DB, userID uint64) error {
+	if userID == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	result := db.Model(&model.AdminUser{}).
+		Where("id = ?", userID).
+		UpdateColumn("token_version", gorm.Expr("token_version + 1"))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }

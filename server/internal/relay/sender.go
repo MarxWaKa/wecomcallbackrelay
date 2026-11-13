@@ -66,6 +66,7 @@ func NewSender(logger *slog.Logger, logRawEvents bool) *Sender {
 			ResponseHeaderTimeout: 10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   32,
 			IdleConnTimeout:       90 * time.Second,
 		},
 	}
