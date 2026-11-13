@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -21,9 +22,13 @@ import (
 const batchReplayConcurrency = 5
 
 var (
-	errDeadLetterNotFound = errors.New("死信不存在")
-	errDeadLetterBusy     = errors.New("死信正在重推，请勿重复操作")
-	errDeadLetterState    = errors.New("当前状态不允许该操作")
+	errDeadLetterNotFound     = errors.New("死信不存在")
+	errDeadLetterBusy         = errors.New("死信正在重推，请勿重复操作")
+	errDeadLetterState        = errors.New("当前状态不允许该操作")
+	errReplayConsumerDeleted  = errors.New("消费端已删除，无法使用最新配置重推；可勾选“使用死信快照配置”后重试")
+	errReplayConsumerDisabled = errors.New("消费端已禁用，无法使用最新配置重推；可勾选“使用死信快照配置”后重试")
+	errReplayConsumerMissing  = errors.New("消费端不存在，无法使用最新配置重推；可勾选“使用死信快照配置”后重试")
+	errReplayPersist          = errors.New("重推结果回写失败")
 )
 
 // DeadLetterHandler 死信查询与人工重推。
@@ -52,8 +57,18 @@ type deadLetterView struct {
 	ResolvedAt   *time.Time `json:"resolved_at"`
 }
 
+type deadLetterConsumerState struct {
+	ConsumerExists      bool   `json:"consumer_exists"`
+	ConsumerDeleted     bool   `json:"consumer_deleted"`
+	ConsumerEnabled     bool   `json:"consumer_enabled"`
+	CurrentConsumerName string `json:"current_consumer_name"`
+	CurrentCallbackURL  string `json:"current_callback_url"`
+	CurrentForwardMode  string `json:"current_forward_mode"`
+}
+
 type deadLetterDetail struct {
 	deadLetterView
+	deadLetterConsumerState
 	RawXML              string `json:"raw_xml"`
 	RawEncryptedBody    string `json:"raw_encrypted_body"`
 	InboundQuery        string `json:"inbound_query"`
@@ -65,6 +80,25 @@ type deadLetterDetail struct {
 	WecomCorpID         string `json:"wecom_corp_id"`
 	WecomAgentID        string `json:"wecom_agent_id"`
 	TimeoutMS           int    `json:"timeout_ms"`
+}
+
+type replayPlan struct {
+	Target       relay.Target
+	Payload      relay.Payload
+	IsProxy      bool
+	RawBody      string
+	RawQuery     string
+	ConfigSource string
+	CallbackURL  string
+}
+
+type replayOutcome struct {
+	Status       string
+	ConfigSource string
+	StatusCode   int
+	LatencyMS    int64
+	CallbackURL  string
+	TaskSynced   bool
 }
 
 // List 死信列表（不返回大字段）。
@@ -133,46 +167,75 @@ func (h *DeadLetterHandler) Get(c *gin.Context) {
 	wecomToken, _ := h.cipher.Decrypt(item.WecomTokenSnapshot)
 	aesKey, _ := h.cipher.Decrypt(item.WecomAESKeySnapshot)
 	OK(c, deadLetterDetail{
-		deadLetterView:      toDeadLetterView(item),
-		RawXML:              item.RawXML,
-		RawEncryptedBody:    item.RawEncryptedBody,
-		InboundQuery:        item.InboundQuery,
-		JSONPayload:         item.JSONPayload,
-		AuthType:            item.AuthType,
-		WecomTokenMasked:    security.MaskSecret(wecomToken),
-		WecomAESKeyMasked:   security.MaskSecret(aesKey),
-		WecomKeyFingerprint: security.KeyFingerprint(wecomToken, aesKey),
-		WecomCorpID:         item.WecomCorpID,
-		WecomAgentID:        item.AgentID,
-		TimeoutMS:           item.TimeoutMS,
+		deadLetterView:          toDeadLetterView(item),
+		deadLetterConsumerState: h.currentConsumerState(item.ConsumerID),
+		RawXML:                  item.RawXML,
+		RawEncryptedBody:        item.RawEncryptedBody,
+		InboundQuery:            item.InboundQuery,
+		JSONPayload:             item.JSONPayload,
+		AuthType:                item.AuthType,
+		WecomTokenMasked:        security.MaskSecret(wecomToken),
+		WecomAESKeyMasked:       security.MaskSecret(aesKey),
+		WecomKeyFingerprint:     security.KeyFingerprint(wecomToken, aesKey),
+		WecomCorpID:             item.WecomCorpID,
+		WecomAgentID:            item.AgentID,
+		TimeoutMS:               item.TimeoutMS,
 	})
 }
 
-// Replay 单条重推。
+// Replay 单条重推。默认使用消费端最新配置，use_snapshot=true 时使用死信快照。
 func (h *DeadLetterHandler) Replay(c *gin.Context) {
 	id, ok := parseID(c, "id")
 	if !ok {
 		return
 	}
-	status, err := h.replayOne(context.Background(), id)
+	useSnapshot, ok := parseUseSnapshot(c)
+	if !ok {
+		return
+	}
+
+	outcome, err := h.replayOne(context.Background(), id, useSnapshot)
+	source := "latest"
+	if useSnapshot {
+		source = "snapshot"
+	}
 	switch {
 	case errors.Is(err, errDeadLetterNotFound):
 		Fail(c, http.StatusNotFound, err.Error())
 		return
-	case errors.Is(err, errDeadLetterBusy), errors.Is(err, errDeadLetterState):
+	case errors.Is(err, errDeadLetterBusy),
+		errors.Is(err, errDeadLetterState),
+		errors.Is(err, errReplayConsumerDeleted),
+		errors.Is(err, errReplayConsumerDisabled),
+		errors.Is(err, errReplayConsumerMissing):
 		Fail(c, http.StatusConflict, err.Error())
 		return
+	case errors.Is(err, errReplayPersist):
+		writeAudit(h.db, c, "dead_letter.replay", "dead_letter", id,
+			truncateMessage("单条重推失败（配置来源："+source+"）: "+err.Error(), 500), "failed")
+		Fail(c, http.StatusInternalServerError, "重推结果回写失败")
+		return
 	case err != nil:
-		writeAudit(h.db, c, "dead_letter.replay", "dead_letter", id, "单条重推失败", "failed")
+		writeAudit(h.db, c, "dead_letter.replay", "dead_letter", id,
+			truncateMessage("单条重推失败（配置来源："+source+"）: "+err.Error(), 500), "failed")
 		Fail(c, http.StatusBadGateway, "重推失败: "+err.Error())
 		return
 	}
-	writeAudit(h.db, c, "dead_letter.replay", "dead_letter", id, "单条重推成功", "success")
-	OK(c, gin.H{"status": status})
+	writeAudit(h.db, c, "dead_letter.replay", "dead_letter", id,
+		fmt.Sprintf("单条重推成功（配置来源：%s，目标：%s，HTTP %d，耗时 %dms，task_synced=%t）",
+			outcome.ConfigSource, outcome.CallbackURL, outcome.StatusCode, outcome.LatencyMS, outcome.TaskSynced), "success")
+	OK(c, gin.H{
+		"status":        outcome.Status,
+		"config_source": outcome.ConfigSource,
+		"http_status":   outcome.StatusCode,
+		"latency_ms":    outcome.LatencyMS,
+		"task_synced":   outcome.TaskSynced,
+	})
 }
 
 type batchReplayRequest struct {
-	IDs []uint64 `json:"ids"`
+	IDs         []uint64 `json:"ids"`
+	UseSnapshot bool     `json:"use_snapshot"`
 }
 
 // ReplayBatch 批量重推，单次上限 50 条。
@@ -194,17 +257,24 @@ func (h *DeadLetterHandler) ReplayBatch(c *gin.Context) {
 	seen := make(map[uint64]struct{}, len(req.IDs))
 	uniqueIDs := make([]uint64, 0, len(req.IDs))
 	for _, id := range req.IDs {
+		if id == 0 {
+			continue
+		}
 		if _, dup := seen[id]; dup {
 			continue
 		}
 		seen[id] = struct{}{}
 		uniqueIDs = append(uniqueIDs, id)
 	}
+	if len(uniqueIDs) == 0 {
+		Fail(c, http.StatusBadRequest, "请选择要重推的死信")
+		return
+	}
 
 	type replayResult struct {
-		id     uint64
-		status string
-		err    error
+		id      uint64
+		outcome replayOutcome
+		err     error
 	}
 	resultCh := make(chan replayResult, len(uniqueIDs))
 	sem := make(chan struct{}, batchReplayConcurrency)
@@ -215,8 +285,8 @@ func (h *DeadLetterHandler) ReplayBatch(c *gin.Context) {
 		go func(id uint64) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			status, err := h.replayOne(context.Background(), id)
-			resultCh <- replayResult{id: id, status: status, err: err}
+			outcome, err := h.replayOne(context.Background(), id, req.UseSnapshot)
+			resultCh <- replayResult{id: id, outcome: outcome, err: err}
 		}(id)
 	}
 	wg.Wait()
@@ -231,14 +301,34 @@ func (h *DeadLetterHandler) ReplayBatch(c *gin.Context) {
 			continue
 		}
 		successCount++
-		results = append(results, gin.H{"id": item.id, "success": true, "status": item.status})
+		results = append(results, gin.H{
+			"id":            item.id,
+			"success":       true,
+			"status":        item.outcome.Status,
+			"config_source": item.outcome.ConfigSource,
+			"http_status":   item.outcome.StatusCode,
+			"latency_ms":    item.outcome.LatencyMS,
+			"task_synced":   item.outcome.TaskSynced,
+		})
+	}
+	auditResult := "success"
+	if successCount == 0 {
+		auditResult = "failed"
+	} else if failedCount > 0 {
+		auditResult = "partial"
+	}
+	sourceLabel := "latest"
+	if req.UseSnapshot {
+		sourceLabel = "snapshot"
 	}
 	writeAudit(h.db, c, "dead_letter.replay_batch", "dead_letter", 0,
-		"批量重推，成功 "+strconv.Itoa(successCount)+" 条，失败 "+strconv.Itoa(failedCount)+" 条", "success")
+		"批量重推，成功 "+strconv.Itoa(successCount)+" 条，失败 "+strconv.Itoa(failedCount)+
+			" 条，配置来源："+sourceLabel, auditResult)
 	OK(c, gin.H{
-		"total":   len(seen),
+		"total":   len(uniqueIDs),
 		"success": successCount,
 		"failed":  failedCount,
+		"result":  auditResult,
 		"results": results,
 	})
 }
@@ -360,110 +450,334 @@ func (h *DeadLetterHandler) DeleteBatch(c *gin.Context) {
 	})
 }
 
-// replayOne 执行单条死信重推，返回最终状态。
-func (h *DeadLetterHandler) replayOne(ctx context.Context, id uint64) (string, error) {
+// replayOne 执行单条死信重推，返回最终状态与投递结果。
+func (h *DeadLetterHandler) replayOne(ctx context.Context, id uint64, useSnapshot bool) (replayOutcome, error) {
+	if id == 0 {
+		return replayOutcome{}, errDeadLetterNotFound
+	}
+	var item model.DeadLetter
+	if err := h.db.First(&item, id).Error; err != nil {
+		return replayOutcome{}, errDeadLetterNotFound
+	}
+	if item.Status == model.DeadStatusReplaying {
+		return replayOutcome{}, errDeadLetterBusy
+	}
+	if item.Status != model.DeadStatusPending && item.Status != model.DeadStatusDiscarded {
+		return replayOutcome{}, errDeadLetterState
+	}
+
+	var consumer *model.Consumer
+	if !useSnapshot {
+		var err error
+		consumer, err = h.loadReplayConsumer(item.ConsumerID)
+		if err != nil {
+			return replayOutcome{}, err
+		}
+	}
+
+	plan, err := h.buildReplayPlan(item, consumer, useSnapshot)
+	if err != nil {
+		return replayOutcome{}, err
+	}
+
 	claim := h.db.Model(&model.DeadLetter{}).
 		Where("id = ? AND status IN ?", id, []string{model.DeadStatusPending, model.DeadStatusDiscarded}).
 		Update("status", model.DeadStatusReplaying)
 	if claim.Error != nil {
-		return "", claim.Error
+		return replayOutcome{}, claim.Error
 	}
 	if claim.RowsAffected == 0 {
 		var current model.DeadLetter
 		if err := h.db.First(&current, id).Error; err != nil {
-			return "", errDeadLetterNotFound
+			return replayOutcome{}, errDeadLetterNotFound
 		}
 		if current.Status == model.DeadStatusReplaying {
-			return "", errDeadLetterBusy
+			return replayOutcome{}, errDeadLetterBusy
 		}
-		return "", errDeadLetterState
+		return replayOutcome{}, errDeadLetterState
 	}
 
-	var item model.DeadLetter
-	if err := h.db.First(&item, id).Error; err != nil {
-		return "", errDeadLetterNotFound
-	}
-
-	target := relay.Target{
-		ConsumerID:  item.ConsumerID,
-		Name:        item.ConsumerName,
-		CallbackURL: item.CallbackURL,
-		ForwardMode: item.ForwardMode,
-		TimeoutMS:   item.TimeoutMS,
-	}
-
+	var statusCode int
 	var elapsed time.Duration
 	var deliverErr error
-
-	if item.ForwardMode == model.ForwardModeWecomProxy {
-		if item.RawEncryptedBody == "" || item.InboundQuery == "" {
-			return h.finishReplay(item, false, "该死信缺少原始加密报文快照，无法原样透传")
-		}
-		_, elapsed, deliverErr = h.sender.DeliverProxy(ctx, target, item.RawEncryptedBody, item.InboundQuery)
+	if plan.IsProxy {
+		statusCode, elapsed, deliverErr = h.sender.DeliverProxy(ctx, plan.Target, plan.RawBody, plan.RawQuery)
 	} else {
-		authConfig, err := h.cipher.Decrypt(item.AuthConfig)
-		if err != nil {
-			return h.finishReplay(item, false, "认证配置解密失败: "+err.Error())
-		}
-		wecomToken, err := h.cipher.Decrypt(item.WecomTokenSnapshot)
-		if err != nil {
-			return h.finishReplay(item, false, "Token 解密失败: "+err.Error())
-		}
-		wecomAESKey, err := h.cipher.Decrypt(item.WecomAESKeySnapshot)
-		if err != nil {
-			return h.finishReplay(item, false, "EncodingAESKey 解密失败: "+err.Error())
-		}
-		target.AuthType = item.AuthType
-		target.AuthConfig = authConfig
-		target.WecomToken = wecomToken
-		target.WecomEncodingAESKey = wecomAESKey
-		target.WecomCorpID = item.WecomCorpID
+		statusCode, elapsed, deliverErr = h.sender.Deliver(ctx, plan.Target, plan.Payload)
+	}
 
-		payload := relay.Payload{
+	outcome := replayOutcome{
+		ConfigSource: plan.ConfigSource,
+		StatusCode:   statusCode,
+		LatencyMS:    elapsed.Milliseconds(),
+		CallbackURL:  plan.CallbackURL,
+	}
+	if deliverErr != nil {
+		status, taskSynced, finishErr := h.finishReplay(item, false, statusCode, elapsed, deliverErr.Error())
+		outcome.Status = status
+		outcome.TaskSynced = taskSynced
+		if finishErr != nil {
+			return outcome, fmt.Errorf("%w: %v", errReplayPersist, finishErr)
+		}
+		return outcome, deliverErr
+	}
+
+	status, taskSynced, finishErr := h.finishReplay(item, true, statusCode, elapsed, "")
+	outcome.Status = status
+	outcome.TaskSynced = taskSynced
+	if finishErr != nil {
+		return outcome, fmt.Errorf("%w: %v", errReplayPersist, finishErr)
+	}
+	h.logger.Info("死信重推成功",
+		"dead_letter_id", item.ID,
+		"event_id", item.EventID,
+		"consumer_id", item.ConsumerID,
+		"config_source", plan.ConfigSource,
+		"http_status", statusCode,
+		"latency_ms", elapsed.Milliseconds(),
+		"task_synced", taskSynced,
+	)
+	return outcome, nil
+}
+
+// loadReplayConsumer 加载用于重推的最新消费端，并区分删除/禁用/不存在。
+func (h *DeadLetterHandler) loadReplayConsumer(id uint64) (*model.Consumer, error) {
+	if id == 0 {
+		return nil, errReplayConsumerMissing
+	}
+	var consumer model.Consumer
+	err := h.db.First(&consumer, id).Error
+	if err == nil {
+		if !consumer.Enabled {
+			return nil, errReplayConsumerDisabled
+		}
+		return &consumer, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	var deleted model.Consumer
+	if err := h.db.Unscoped().First(&deleted, id).Error; err == nil {
+		return nil, errReplayConsumerDeleted
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	return nil, errReplayConsumerMissing
+}
+
+// buildReplayPlan 按最新消费端或死信快照构造投递目标。
+// ForwardMode 始终使用死信快照，避免切换模式后载荷不兼容。
+func (h *DeadLetterHandler) buildReplayPlan(item model.DeadLetter, consumer *model.Consumer, useSnapshot bool) (replayPlan, error) {
+	plan := replayPlan{
+		ConfigSource: "latest",
+		Target: relay.Target{
+			ConsumerID:  item.ConsumerID,
+			ForwardMode: item.ForwardMode,
+		},
+		Payload: relay.Payload{
 			EventID:     item.EventID,
 			AgentID:     item.AgentID,
 			RawXML:      item.RawXML,
 			JSONPayload: item.JSONPayload,
+		},
+	}
+	if useSnapshot {
+		plan.ConfigSource = "snapshot"
+		plan.Target.Name = item.ConsumerName
+		plan.Target.CallbackURL = item.CallbackURL
+		plan.Target.TimeoutMS = item.TimeoutMS
+	} else {
+		if consumer == nil {
+			return plan, errReplayConsumerMissing
 		}
-		_, elapsed, deliverErr = h.sender.Deliver(ctx, target, payload)
+		plan.Target.Name = consumer.Name
+		plan.Target.CallbackURL = consumer.CallbackURL
+		plan.Target.TimeoutMS = consumer.TimeoutMS
+		if consumer.WecomAgentID != "" {
+			plan.Payload.AgentID = consumer.WecomAgentID
+		}
 	}
-	if deliverErr != nil {
-		return h.finishReplay(item, false, deliverErr.Error())
+	plan.CallbackURL = plan.Target.CallbackURL
+
+	if item.ForwardMode == model.ForwardModeWecomProxy {
+		if strings.TrimSpace(item.RawEncryptedBody) == "" || strings.TrimSpace(item.InboundQuery) == "" {
+			return plan, errors.New("该死信缺少原始加密报文快照，无法原样透传")
+		}
+		plan.IsProxy = true
+		plan.RawBody = item.RawEncryptedBody
+		plan.RawQuery = item.InboundQuery
+		return plan, nil
 	}
-	h.logger.Info("死信重推成功", "dead_letter_id", item.ID, "event_id", item.EventID,
-		"consumer_id", item.ConsumerID, "latency_ms", elapsed.Milliseconds())
-	return h.finishReplay(item, true, "")
+
+	if useSnapshot {
+		if item.ForwardMode == model.ForwardModeWecomXML {
+			wecomToken, err := h.cipher.Decrypt(item.WecomTokenSnapshot)
+			if err != nil {
+				return plan, errors.New("Token 解密失败: " + err.Error())
+			}
+			wecomAESKey, err := h.cipher.Decrypt(item.WecomAESKeySnapshot)
+			if err != nil {
+				return plan, errors.New("EncodingAESKey 解密失败: " + err.Error())
+			}
+			plan.Target.WecomToken = wecomToken
+			plan.Target.WecomEncodingAESKey = wecomAESKey
+			plan.Target.WecomCorpID = item.WecomCorpID
+			return plan, nil
+		}
+		authConfig, err := h.cipher.Decrypt(item.AuthConfig)
+		if err != nil {
+			return plan, errors.New("认证配置解密失败: " + err.Error())
+		}
+		plan.Target.AuthType = item.AuthType
+		plan.Target.AuthConfig = authConfig
+		return plan, nil
+	}
+
+	if item.ForwardMode == model.ForwardModeWecomXML {
+		wecomToken, err := h.cipher.Decrypt(consumer.WecomToken)
+		if err != nil {
+			return plan, errors.New("消费端 Token 解密失败: " + err.Error())
+		}
+		wecomAESKey, err := h.cipher.Decrypt(consumer.WecomEncodingAESKey)
+		if err != nil {
+			return plan, errors.New("消费端 EncodingAESKey 解密失败: " + err.Error())
+		}
+		plan.Target.WecomToken = wecomToken
+		plan.Target.WecomEncodingAESKey = wecomAESKey
+		plan.Target.WecomCorpID = consumer.WecomCorpID
+		return plan, nil
+	}
+
+	authConfig, err := h.cipher.Decrypt(consumer.AuthConfig)
+	if err != nil {
+		return plan, errors.New("消费端认证配置解密失败: " + err.Error())
+	}
+	plan.Target.AuthType = consumer.AuthType
+	plan.Target.AuthConfig = authConfig
+	return plan, nil
 }
 
-func (h *DeadLetterHandler) finishReplay(item model.DeadLetter, success bool, message string) (string, error) {
+func (h *DeadLetterHandler) finishReplay(item model.DeadLetter, success bool, statusCode int, elapsed time.Duration, message string) (string, bool, error) {
 	if success {
-		now := time.Now()
-		err := h.db.Model(&model.DeadLetter{}).
-			Where("id = ? AND status = ?", item.ID, model.DeadStatusReplaying).
-			Updates(map[string]any{
-				"status":      model.DeadStatusResolved,
-				"resolved_at": now,
-				"last_error":  "",
-			}).Error
+		var taskSynced bool
+		err := h.db.Transaction(func(tx *gorm.DB) error {
+			result := tx.Model(&model.DeadLetter{}).
+				Where("id = ? AND status = ?", item.ID, model.DeadStatusReplaying).
+				Updates(map[string]any{
+					"status":      model.DeadStatusResolved,
+					"resolved_at": time.Now(),
+					"last_error":  "",
+				})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 0 {
+				return errDeadLetterState
+			}
+
+			task := tx.Model(&model.RelayTask{}).
+				Where("event_id = ? AND consumer_id = ? AND status = ?",
+					item.EventID, item.ConsumerID, model.TaskStatusDead).
+				Updates(map[string]any{
+					"status":           model.TaskStatusSuccess,
+					"last_error":       "",
+					"next_retry_at":    nil,
+					"last_http_status": statusCode,
+					"last_latency_ms":  elapsed.Milliseconds(),
+				})
+			if task.Error != nil {
+				// 投递已成功，推送记录回写失败只记录告警，不回滚死信 resolved，
+				// 避免把一次成功投递误标为失败并触发重复重推。
+				h.logger.Warn("死信重推成功但回写推送记录失败",
+					"dead_letter_id", item.ID, "event_id", item.EventID, "consumer_id", item.ConsumerID,
+					"error", task.Error)
+			} else if task.RowsAffected == 0 {
+				h.logger.Warn("死信重推成功但未找到可回写的推送记录",
+					"dead_letter_id", item.ID, "event_id", item.EventID, "consumer_id", item.ConsumerID)
+			} else {
+				taskSynced = true
+			}
+			return nil
+		})
 		if err != nil {
-			return "", err
+			h.releaseReplayClaim(item.ID, err)
+			return "", false, err
 		}
-		return model.DeadStatusResolved, nil
+		return model.DeadStatusResolved, taskSynced, nil
 	}
 
-	if len(message) > 2000 {
-		message = message[:2000]
-	}
-	err := h.db.Model(&model.DeadLetter{}).
+	msg := truncateMessage(message, 2000)
+	result := h.db.Model(&model.DeadLetter{}).
 		Where("id = ? AND status = ?", item.ID, model.DeadStatusReplaying).
 		Updates(map[string]any{
 			"status":     model.DeadStatusPending,
-			"last_error": message,
-		}).Error
-	if err != nil {
-		return "", err
+			"last_error": msg,
+		})
+	if result.Error != nil {
+		h.releaseReplayClaim(item.ID, result.Error)
+		return "", false, result.Error
 	}
-	return model.DeadStatusPending, errors.New(message)
+	if result.RowsAffected == 0 {
+		return "", false, errDeadLetterState
+	}
+	return model.DeadStatusPending, false, nil
+}
+
+// releaseReplayClaim 在收尾失败时尽量把死信从 replaying 放回 pending。
+func (h *DeadLetterHandler) releaseReplayClaim(id uint64, cause error) {
+	msg := truncateMessage("重推结果回写失败: "+cause.Error(), 2000)
+	if err := h.db.Model(&model.DeadLetter{}).
+		Where("id = ? AND status = ?", id, model.DeadStatusReplaying).
+		Updates(map[string]any{
+			"status":     model.DeadStatusPending,
+			"last_error": msg,
+		}).Error; err != nil {
+		h.logger.Error("死信重推失败后回滚状态失败", "dead_letter_id", id, "error", err)
+	}
+}
+
+func (h *DeadLetterHandler) currentConsumerState(consumerID uint64) deadLetterConsumerState {
+	var state deadLetterConsumerState
+	if consumerID == 0 {
+		return state
+	}
+	var consumer model.Consumer
+	if err := h.db.Unscoped().
+		Select("id, name, callback_url, forward_mode, enabled, deleted_at").
+		First(&consumer, consumerID).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			h.logger.Warn("读取死信当前消费端状态失败", "consumer_id", consumerID, "error", err)
+		}
+		return state
+	}
+	state.ConsumerExists = true
+	state.ConsumerDeleted = consumer.DeletedAt.Valid
+	state.ConsumerEnabled = consumer.Enabled
+	state.CurrentConsumerName = consumer.Name
+	state.CurrentCallbackURL = consumer.CallbackURL
+	state.CurrentForwardMode = consumer.ForwardMode
+	return state
+}
+
+func parseUseSnapshot(c *gin.Context) (bool, bool) {
+	raw, exists := c.GetQuery("use_snapshot")
+	if !exists || strings.TrimSpace(raw) == "" {
+		return false, true
+	}
+	value, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		Fail(c, http.StatusBadRequest, "use_snapshot 必须为布尔值")
+		return false, false
+	}
+	return value, true
+}
+
+func truncateMessage(value string, limit int) string {
+	if len(value) > limit {
+		return value[:limit]
+	}
+	return value
 }
 
 func toDeadLetterView(item model.DeadLetter) deadLetterView {

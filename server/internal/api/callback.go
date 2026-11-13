@@ -182,14 +182,16 @@ func (h *CallbackHandler) Receive(c *gin.Context) {
 			maxRetry = 5
 		}
 		task := model.RelayTask{
-			EventID:     eventID,
-			ConsumerID:  consumer.ID,
-			ForwardMode: consumer.ForwardMode,
-			AgentID:     envelope.AgentID,
-			RawXML:      plain,
-			JSONPayload: string(payload),
-			Status:      model.TaskStatusPending,
-			MaxRetry:    maxRetry,
+			EventID:      eventID,
+			ConsumerID:   consumer.ID,
+			ConsumerName: consumer.Name,
+			CallbackURL:  consumer.CallbackURL,
+			ForwardMode:  consumer.ForwardMode,
+			AgentID:      envelope.AgentID,
+			RawXML:       plain,
+			JSONPayload:  string(payload),
+			Status:       model.TaskStatusPending,
+			MaxRetry:     maxRetry,
 		}
 		if consumer.ForwardMode == model.ForwardModeWecomProxy {
 			task.RawEncryptedBody = string(body)

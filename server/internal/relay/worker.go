@@ -15,40 +15,46 @@ import (
 )
 
 const (
-	defaultMaxRetry = 5
-	claimBatchSize  = 100
-	stuckTimeout    = 5 * time.Minute
+	defaultMaxRetry            = 5
+	defaultPushRecordRetention = 30
+	claimBatchSize             = 100
+	stuckTimeout               = 5 * time.Minute
 )
 
 // Worker 轮询 relay_tasks 并异步投递。
 type Worker struct {
-	db           *gorm.DB
-	cipher       *security.Cipher
-	sender       *Sender
-	logger       *slog.Logger
-	interval     time.Duration
-	concurrency  int
-	backoff      []time.Duration
-	logRawEvents bool
-	wg           sync.WaitGroup
+	db            *gorm.DB
+	cipher        *security.Cipher
+	sender        *Sender
+	logger        *slog.Logger
+	interval      time.Duration
+	concurrency   int
+	backoff       []time.Duration
+	logRawEvents  bool
+	retentionDays int
+	wg            sync.WaitGroup
 }
 
-func NewWorker(db *gorm.DB, cipher *security.Cipher, sender *Sender, logger *slog.Logger, interval time.Duration, concurrency int, backoff []time.Duration, logRawEvents bool) *Worker {
+func NewWorker(db *gorm.DB, cipher *security.Cipher, sender *Sender, logger *slog.Logger, interval time.Duration, concurrency int, backoff []time.Duration, logRawEvents bool, retentionDays int) *Worker {
 	if concurrency < 1 {
 		concurrency = 1
 	}
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
+	if retentionDays < 0 {
+		retentionDays = defaultPushRecordRetention
+	}
 	return &Worker{
-		db:           db,
-		cipher:       cipher,
-		sender:       sender,
-		logger:       logger,
-		interval:     interval,
-		concurrency:  concurrency,
-		backoff:      backoff,
-		logRawEvents: logRawEvents,
+		db:            db,
+		cipher:        cipher,
+		sender:        sender,
+		logger:        logger,
+		interval:      interval,
+		concurrency:   concurrency,
+		backoff:       backoff,
+		logRawEvents:  logRawEvents,
+		retentionDays: retentionDays,
 	}
 }
 
@@ -242,9 +248,20 @@ func (w *Worker) processTask(ctx context.Context, taskID uint64) {
 		statusCode, elapsed, err = w.sender.Deliver(ctx, target, payload)
 	}
 	if err == nil {
-		w.db.Model(&model.RelayTask{}).
+		result := w.db.Model(&model.RelayTask{}).
 			Where("id = ? AND status = ?", task.ID, model.TaskStatusSending).
-			Updates(map[string]any{"status": model.TaskStatusSuccess, "last_error": ""})
+			Updates(map[string]any{
+				"status":           model.TaskStatusSuccess,
+				"last_error":       "",
+				"next_retry_at":    nil,
+				"last_http_status": statusCode,
+				"last_latency_ms":  elapsed.Milliseconds(),
+			})
+		if result.Error != nil {
+			w.logger.Error("更新投递成功状态失败", "task_id", task.ID, "error", result.Error)
+		} else if result.RowsAffected == 0 {
+			w.logger.Warn("投递成功但任务状态已被其他流程改变", "task_id", task.ID)
+		}
 		w.logger.Info("投递成功",
 			"event_id", task.EventID,
 			"consumer_id", consumer.ID,
@@ -267,10 +284,10 @@ func (w *Worker) processTask(ctx context.Context, taskID uint64) {
 		"retry", task.RetryCount,
 		"error", err,
 	)
-	w.handleFailure(task, consumer, target, statusCode, err)
+	w.handleFailure(task, consumer, target, statusCode, elapsed, err)
 }
 
-func (w *Worker) handleFailure(task model.RelayTask, consumer model.Consumer, target Target, statusCode int, deliverErr error) {
+func (w *Worker) handleFailure(task model.RelayTask, consumer model.Consumer, target Target, statusCode int, elapsed time.Duration, deliverErr error) {
 	// Sender 的错误信息已包含 HTTP 状态码，避免重复拼接。
 	lastError := deliverErr.Error()
 	if len(lastError) > 2000 {
@@ -283,25 +300,29 @@ func (w *Worker) handleFailure(task model.RelayTask, consumer model.Consumer, ta
 		maxRetry = defaultMaxRetry
 	}
 	if newRetry > maxRetry {
-		w.toDeadLetter(task, consumer, target, newRetry, lastError)
+		w.toDeadLetter(task, consumer, target, newRetry, statusCode, elapsed, lastError)
 		return
 	}
 
 	nextRetryAt := time.Now().Add(BackoffFor(w.backoff, newRetry))
-	err := w.db.Model(&model.RelayTask{}).
+	result := w.db.Model(&model.RelayTask{}).
 		Where("id = ? AND status = ?", task.ID, model.TaskStatusSending).
 		Updates(map[string]any{
-			"status":        model.TaskStatusPending,
-			"retry_count":   newRetry,
-			"next_retry_at": nextRetryAt,
-			"last_error":    lastError,
-		}).Error
-	if err != nil {
-		w.logger.Error("更新重试任务失败", "task_id", task.ID, "error", err)
+			"status":           model.TaskStatusPending,
+			"retry_count":      newRetry,
+			"next_retry_at":    nextRetryAt,
+			"last_error":       lastError,
+			"last_http_status": statusCode,
+			"last_latency_ms":  elapsed.Milliseconds(),
+		})
+	if result.Error != nil {
+		w.logger.Error("更新重试任务失败", "task_id", task.ID, "error", result.Error)
+	} else if result.RowsAffected == 0 {
+		w.logger.Warn("更新重试任务失败：任务状态已被其他流程改变", "task_id", task.ID)
 	}
 }
 
-func (w *Worker) toDeadLetter(task model.RelayTask, consumer model.Consumer, target Target, retryCount int, lastError string) {
+func (w *Worker) toDeadLetter(task model.RelayTask, consumer model.Consumer, target Target, retryCount int, statusCode int, elapsed time.Duration, lastError string) {
 	deadAgentID := task.AgentID
 	if task.ForwardMode == model.ForwardModeWecomXML && consumer.WecomAgentID != "" {
 		deadAgentID = consumer.WecomAgentID
@@ -310,10 +331,12 @@ func (w *Worker) toDeadLetter(task model.RelayTask, consumer model.Consumer, tar
 		result := tx.Model(&model.RelayTask{}).
 			Where("id = ? AND status = ?", task.ID, model.TaskStatusSending).
 			Updates(map[string]any{
-				"status":        model.TaskStatusDead,
-				"retry_count":   retryCount,
-				"next_retry_at": nil,
-				"last_error":    lastError,
+				"status":           model.TaskStatusDead,
+				"retry_count":      retryCount,
+				"next_retry_at":    nil,
+				"last_error":       lastError,
+				"last_http_status": statusCode,
+				"last_latency_ms":  elapsed.Milliseconds(),
 			})
 		if result.Error != nil {
 			return result.Error
@@ -360,14 +383,21 @@ func (w *Worker) markFailed(task model.RelayTask, reason string) {
 	if len(reason) > 2000 {
 		reason = reason[:2000]
 	}
-	err := w.db.Model(&model.RelayTask{}).
+	result := w.db.Model(&model.RelayTask{}).
 		Where("id = ? AND status = ?", task.ID, model.TaskStatusSending).
 		Updates(map[string]any{
-			"status":     model.TaskStatusFailed,
-			"last_error": reason,
-		}).Error
-	if err != nil {
-		w.logger.Error("标记任务失败状态出错", "task_id", task.ID, "error", err)
+			"status":           model.TaskStatusFailed,
+			"last_error":       reason,
+			"next_retry_at":    nil,
+			"last_http_status": 0,
+			"last_latency_ms":  0,
+		})
+	if result.Error != nil {
+		w.logger.Error("标记任务失败状态出错", "task_id", task.ID, "error", result.Error)
+		return
+	}
+	if result.RowsAffected == 0 {
+		w.logger.Warn("标记任务失败状态未生效：任务状态已被其他流程改变", "task_id", task.ID)
 		return
 	}
 	w.logger.Warn("投递任务跳过", "event_id", task.EventID, "consumer_id", task.ConsumerID, "reason", reason)
@@ -453,7 +483,8 @@ func (w *Worker) checkDeadLetterAlerts() {
 	}
 }
 
-// cleanup 清理过期死信与已完成任务：resolved 30 天、discarded 7 天、任务 30 天。
+// cleanup 清理过期死信与已完成任务：resolved 30 天、discarded 7 天；
+// 推送记录按 retentionDays 清理，0 表示永久保留。
 func (w *Worker) cleanup() {
 	now := time.Now()
 	if err := w.db.Where("status = ? AND resolved_at < ?", model.DeadStatusResolved, now.AddDate(0, 0, -30)).
@@ -464,8 +495,18 @@ func (w *Worker) cleanup() {
 		Delete(&model.DeadLetter{}).Error; err != nil {
 		w.logger.Error("清理已丢弃死信失败", "error", err)
 	}
-	if err := w.db.Where("status IN ? AND updated_at < ?", []string{model.TaskStatusSuccess, model.TaskStatusFailed, model.TaskStatusDead}, now.AddDate(0, 0, -30)).
-		Delete(&model.RelayTask{}).Error; err != nil {
-		w.logger.Error("清理历史任务失败", "error", err)
+	if w.retentionDays <= 0 {
+		return
+	}
+	cutoff := now.AddDate(0, 0, -w.retentionDays)
+	result := w.db.Where("status IN ? AND updated_at < ?",
+		[]string{model.TaskStatusSuccess, model.TaskStatusFailed, model.TaskStatusDead}, cutoff).
+		Delete(&model.RelayTask{})
+	if result.Error != nil {
+		w.logger.Error("清理历史推送记录失败", "error", result.Error)
+		return
+	}
+	if result.RowsAffected > 0 {
+		w.logger.Info("已清理历史推送记录", "count", result.RowsAffected, "retention_days", w.retentionDays)
 	}
 }

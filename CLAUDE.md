@@ -19,6 +19,9 @@ go test ./...                                # 全部单元 + 集成测试
 go test ./internal/wecom -v                  # 企微加解密 / XML 映射
 go test ./internal/relay -v                  # 双模式投递 / HMAC / 退避
 go test ./internal/api -run TestCallback -v  # 回调集成测试（纯 Go SQLite）
+go test ./internal/api -run TestPushRecord -v # 推送记录列表/详情/删除
+go test ./internal/api -run 'TestReplay|TestGetDeadLetter' -v # 死信重推
+go test ./internal/router -v                 # 登录/JWT 吊销/RBAC
 go test ./internal/api -run TestCallbackReceive -v
 go vet ./...
 go build ./...
@@ -52,7 +55,7 @@ docker compose logs -f backend
   - POST：解析加密 XML → 验签 → 解密 → 解析事件 → 为每个启用消费端写入一条 `relay_tasks`（`OnConflict DoNothing` 幂等）→ 立即返回 `success`。
   - 验签/解密失败返回 403 且不入库；**明文解析失败返回 200 success 但记 ERROR、不入库**（防止企微重试风暴）。
 - **管理 API** `/api/*`（`internal/router/router.go`）
-  - 登录在 JWT 之外；其余接口依次经过 `JWTAuth` → `CasbinAuth`（admin 全权限、viewer 只读 GET）。
+  - 登录在 JWT 之外；其余接口依次经过 `JWTAuth` → `CasbinAuth`（admin 全权限、viewer 只读 GET）。`JWTAuth` 每次请求回查 `admin_users` 的 `enabled/role/token_version`，角色以数据库为准；账号删除/禁用/改密/登出/角色变化会立即失效。
   - `/api/admin-users` 额外要求 `RequireRole("admin")`。
   - 响应统一为 `{code:0,msg:"ok",data:...}`，错误使用对应 HTTP 状态。
 
@@ -69,9 +72,10 @@ docker compose logs -f backend
 
 - `consumers`：`forward_mode` = `json|wecom_xml`；兼容模式保存加密后的 `wecom_token`、`wecom_encoding_aes_key`、明文 `wecom_corp_id`。
 - `wecom_config`：本期单条记录，`secret/token/encoding_aes_key` 加密存储。
-- `relay_tasks`：`(event_id, consumer_id)` 唯一索引，快照 `raw_xml` 与 `json_payload`。
+- `relay_tasks`：`(event_id, consumer_id)` 唯一索引，快照 `raw_xml`、`json_payload`、`consumer_name`、`callback_url`，并记录最近一次投递结果 `last_http_status`/`last_latency_ms`。
 - `dead_letters`：保存投递目标、认证与密钥快照；状态 `pending|replaying|resolved|discarded`。
-- `admin_users`、`audit_logs`。
+- `admin_users`：包含 `enabled`、`role` 与 `token_version`；`token_version` 用于立即吊销已签发的 JWT。
+- `audit_logs`。
 
 ## 关键约束与易踩坑点
 
@@ -84,10 +88,13 @@ docker compose logs -f backend
 7. **兼容模式密钥**：入站解密用全局 `wecom_config`；出站重加密用**消费端**的 `wecom_token/aes_key/corp_id`。两者在无感切换场景下通常配置为同一套，但代码上相互独立。
 8. **AgentID 透传**：入站外层 XML 的 `<AgentID>` 会快照到 `relay_tasks.agent_id` / `dead_letters.agent_id`，兼容模式转发时原样写回外层报文；测试按钮使用消费端可选的 `wecom_agent_id`。修改外层报文构造时保持 `ToUserName → Encrypt → AgentID` 顺序，AgentID 为空也保留空节点。
 9. **原样透传模式**：`wecom_proxy` 在入站时把原始加密 Body 与 Query 快照到 `relay_tasks.raw_encrypted_body/inbound_query`，Worker 用 `Sender.DeliverProxy` 原样转发，不重新加密；消费端必须与「企微参数」共享 Token/AESKey/CorpID。死信同样保存这两份快照，缺少快照时重推直接失败。
-10. **死信快照**：死信重推使用创建时的 CorpID/Token/AESKey/AgentID 快照，不会自动读取修改后的消费端配置；排查“改了配置仍失败”时先确认快照是否过期。死信支持 `DELETE /api/dead-letters/:id` 与 `POST /api/dead-letters/batch-delete`（≤100）；`replaying` 状态单条删除返回 409、批量删除自动跳过。
+10. **死信快照与重推**：死信创建时保存 URL/认证/密钥/AgentID/ForwardMode 快照。人工重推默认使用消费端最新 URL/Name/Timeout/AuthType/AuthConfig/Token/AESKey/CorpID/AgentID，但 ForwardMode 与载荷仍使用死信快照；消费端软删除或禁用时默认拒绝，需显式 `use_snapshot=true` 使用快照重推。重推成功后在同一事务内把 `(event_id, consumer_id)` 且 `status=dead` 的 `relay_tasks` 回写为 `success` 并写入 HTTP 状态/耗时；任务不存在或已非 dead 时只记录 warn。死信支持 `DELETE /api/dead-letters/:id` 与 `POST /api/dead-letters/batch-delete`（≤100）；`replaying` 状态单条删除返回 409、批量删除自动跳过。
 11. **多实例**：Worker 的 `SKIP LOCKED` 抢占依赖 MySQL 8.0+；SQLite 仅用于测试，不支持该锁，因此不要给 Worker 写 SQLite 集成测试。
 12. **前端令牌键**是 `relay_token` / `relay_user`（`web/src/store/auth.js`）；HTTP 401 时会清理并跳转登录（`web/src/api/http.js`）。
 13. **前端敏感字段**：编辑消费端/企微参数时，密码类输入框留空表示不修改；不要用脱敏值回填真实输入框后再提交（会被当成新值）。
+14. **推送记录**：直接复用 `relay_tasks`，不新建按次尝试表；`GET /api/push-records` 只返回小字段，详情单独拉 `raw_xml/json_payload`。仅 `success/failed/dead` 可删除，`pending/sending` 单条返回 409、批量自动跳过；删除 `dead` 记录不影响死信，死信人工重推成功会回写对应 `relay_tasks`。保留天数由 `PUSH_RECORD_RETENTION_DAYS` 控制（默认 30，`0` 永久），Worker 每日清理终态记录。
+15. **JWT 吊销**：`admin_users.token_version` 默认 1；JWT 携带 `tv`，`JWTAuth` 每次请求回查数据库并校验 `enabled/role/token_version`。登出、改密、重置密码、角色或启用状态实际变化时自增 `token_version`；仅改昵称不自增。一次登出会使该账号所有设备令牌失效。升级到该版本后旧 JWT（无 `tv`）会全部失效，需重新登录。
+16. **出站连接与端口**：`Sender` 设置 `MaxIdleConnsPerHost=32`；`BACKEND_PORT` 由 compose 映射为后端 `SERVER_PORT`，但 `web/nginx.conf` 硬编码 `backend:8888`，修改端口必须同步修改 nginx 并重建 frontend。
 
 ## 测试布局
 
@@ -97,6 +104,9 @@ docker compose logs -f backend
 - `internal/relay/worker_wecom_test.go`：企微兼容模式与原样透传模式的 Worker 投递。
 - `internal/relay/backoff_test.go`：退避序列。
 - `internal/api/callback_test.go`：基于 `github.com/glebarez/sqlite` 的回调集成测试（GET 验证、POST、幂等、403、解析失败、AgentID 透传）。
+- `internal/api/push_record_test.go`：推送记录列表/详情/删除/批量删除与终态保护。
+- `internal/api/dead_letter_replay_test.go`：最新配置/快照重推、消费端删除/禁用、任务回写、批量审计。
+- `internal/router/router_test.go`：登录、RBAC、JWT 登出/改密/禁用/删除吊销。
 - `internal/security/cipher_test.go`：AES-GCM 与脱敏。
 
 ## 与需求文档的已知差异
@@ -104,4 +114,6 @@ docker compose logs -f backend
 - 未引入完整 gin-vue-admin：登录、JWT、Casbin 角色、管理员 CRUD 为轻量实现；无动态菜单/`sys_*` 表。
 - 初始管理员由后端按环境变量创建，而非 `init.sql`。
 - `relay_tasks` 增加 `sending` 状态用于多实例抢占；需求文档只列了 pending/success/failed/dead。
+- 死信重推默认使用消费端最新配置（`use_snapshot` 可回退快照），且成功后回写 `relay_tasks`；需求文档按快照重推且未定义状态回写。
+- JWT 增加账号级 `token_version` 吊销机制；需求文档未定义。
 - 字段加密使用 AES-256-GCM（文档只写 AES）。

@@ -23,12 +23,22 @@ export const createWecomConfig = (data) => http.post('/wecom-config', data)
 export const updateWecomConfig = (id, data) => http.put(`/wecom-config/${id}`, data)
 export const deleteWecomConfig = (id) => http.delete(`/wecom-config/${id}`)
 
+// 推送记录
+export const listPushRecords = (params) => http.get('/push-records', { params })
+export const getPushRecord = (id) => http.get(`/push-records/${id}`)
+export const deletePushRecord = (id) => http.delete(`/push-records/${id}`)
+export const batchDeletePushRecords = (ids) => http.post('/push-records/batch-delete', { ids })
+
 // 死信
 export const listDeadLetters = (params) => http.get('/dead-letters', { params })
 export const getDeadLetter = (id) => http.get(`/dead-letters/${id}`)
-export const replayDeadLetter = (id) => http.post(`/dead-letters/${id}/replay`, null, { timeout: 180000 })
-export const batchReplayDeadLetters = (ids) =>
-  http.post('/dead-letters/replay-batch', { ids }, { timeout: 180000 })
+export const replayDeadLetter = (id, useSnapshot = false) =>
+  http.post(`/dead-letters/${id}/replay`, null, {
+    params: { use_snapshot: useSnapshot },
+    timeout: 180000
+  })
+export const batchReplayDeadLetters = (ids, useSnapshot = false) =>
+  http.post('/dead-letters/replay-batch', { ids, use_snapshot: useSnapshot }, { timeout: 180000 })
 export const discardDeadLetter = (id) => http.put(`/dead-letters/${id}/discard`)
 export const deleteDeadLetter = (id) => http.delete(`/dead-letters/${id}`)
 export const batchDeleteDeadLetters = (ids) => http.post('/dead-letters/batch-delete', { ids })

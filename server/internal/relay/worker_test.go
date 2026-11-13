@@ -42,7 +42,7 @@ func newWorkerFixture(t *testing.T) *workerFixture {
 		t.Fatalf("创建加密器失败: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	worker := NewWorker(db, cipher, NewSender(logger, false), logger, time.Second, 2, nil, false)
+	worker := NewWorker(db, cipher, NewSender(logger, false), logger, time.Second, 2, nil, false, 30)
 	return &workerFixture{db: db, worker: worker, cipher: cipher}
 }
 
@@ -96,6 +96,12 @@ func TestProcessTaskSuccess(t *testing.T) {
 	if updated.Status != model.TaskStatusSuccess {
 		t.Fatalf("任务应成功，实际状态 %s，错误 %s", updated.Status, updated.LastError)
 	}
+	if updated.LastHTTPStatus != http.StatusOK {
+		t.Fatalf("成功任务应记录 HTTP 200，实际 %d", updated.LastHTTPStatus)
+	}
+	if updated.NextRetryAt != nil {
+		t.Fatalf("成功任务不应保留下次重试时间: %v", updated.NextRetryAt)
+	}
 	if gotEventID != "evt_worker_test" {
 		t.Fatalf("X-Event-Id 错误: %q", gotEventID)
 	}
@@ -118,6 +124,9 @@ func TestProcessTaskRetriesThenDeadLetter(t *testing.T) {
 	}
 	if first.Status != model.TaskStatusPending || first.RetryCount != 1 || first.NextRetryAt == nil {
 		t.Fatalf("首次失败应进入重试，实际: %+v", first)
+	}
+	if first.LastHTTPStatus != http.StatusBadGateway {
+		t.Fatalf("首次失败应记录 HTTP 502，实际 %d", first.LastHTTPStatus)
 	}
 
 	// 第二次失败：retry_count 2 -> 再次 pending
@@ -147,6 +156,9 @@ func TestProcessTaskRetriesThenDeadLetter(t *testing.T) {
 	if dead.Status != model.TaskStatusDead || dead.RetryCount != 3 {
 		t.Fatalf("超过重试上限应转死信，实际: %+v", dead)
 	}
+	if dead.LastHTTPStatus != http.StatusBadGateway {
+		t.Fatalf("转死信任务应记录 HTTP 502，实际 %d", dead.LastHTTPStatus)
+	}
 
 	var letter model.DeadLetter
 	if err := f.db.Where("event_id = ? AND consumer_id = ?", task.EventID, consumer.ID).First(&letter).Error; err != nil {
@@ -175,9 +187,64 @@ func TestProcessTaskDisabledConsumerMarksFailed(t *testing.T) {
 	if updated.Status != model.TaskStatusFailed {
 		t.Fatalf("禁用消费端的任务应标记 failed，实际 %s", updated.Status)
 	}
+	if updated.LastHTTPStatus != 0 || updated.LastLatencyMS != 0 {
+		t.Fatalf("未发起 HTTP 调用的失败任务应清零结果字段，实际 HTTP=%d latency=%d",
+			updated.LastHTTPStatus, updated.LastLatencyMS)
+	}
 	var letters int64
 	f.db.Model(&model.DeadLetter{}).Count(&letters)
 	if letters != 0 {
 		t.Fatalf("非重试错误不应产生死信，实际 %d", letters)
+	}
+}
+
+func TestCleanupPushRecordsRetention(t *testing.T) {
+	f := newWorkerFixture(t)
+	old := time.Now().AddDate(0, 0, -31)
+	createOldTask := func(eventID, status string) *model.RelayTask {
+		t.Helper()
+		task := &model.RelayTask{
+			EventID:     eventID,
+			ConsumerID:  1,
+			ForwardMode: model.ForwardModeJSON,
+			Status:      status,
+		}
+		if err := f.db.Create(task).Error; err != nil {
+			t.Fatalf("创建任务失败: %v", err)
+		}
+		if err := f.db.Model(task).UpdateColumn("updated_at", old).Error; err != nil {
+			t.Fatalf("修改任务更新时间失败: %v", err)
+		}
+		return task
+	}
+
+	success := createOldTask("evt_cleanup_success", model.TaskStatusSuccess)
+	failed := createOldTask("evt_cleanup_failed", model.TaskStatusFailed)
+	dead := createOldTask("evt_cleanup_dead", model.TaskStatusDead)
+	pending := createOldTask("evt_cleanup_pending", model.TaskStatusPending)
+
+	f.worker.cleanup()
+
+	for _, id := range []uint64{success.ID, failed.ID, dead.ID} {
+		var count int64
+		f.db.Model(&model.RelayTask{}).Where("id = ?", id).Count(&count)
+		if count != 0 {
+			t.Fatalf("超过保留期的终态任务应被清理，ID=%d", id)
+		}
+	}
+	var pendingCount int64
+	f.db.Model(&model.RelayTask{}).Where("id = ?", pending.ID).Count(&pendingCount)
+	if pendingCount != 1 {
+		t.Fatal("待投递任务不应被保留策略清理")
+	}
+
+	// retentionDays=0 表示永久保留。
+	f.worker.retentionDays = 0
+	kept := createOldTask("evt_cleanup_keep", model.TaskStatusSuccess)
+	f.worker.cleanup()
+	var keptCount int64
+	f.db.Model(&model.RelayTask{}).Where("id = ?", kept.ID).Count(&keptCount)
+	if keptCount != 1 {
+		t.Fatal("PUSH_RECORD_RETENTION_DAYS=0 时不应自动清理终态任务")
 	}
 }

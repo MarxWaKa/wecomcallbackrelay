@@ -165,6 +165,9 @@ func TestCallbackReceiveCreatesTasksAndDeduplicates(t *testing.T) {
 	if task.ForwardMode != model.ForwardModeJSON || task.Status != model.TaskStatusPending {
 		t.Fatalf("任务快照错误: %+v", task)
 	}
+	if task.ConsumerName != "测试消费端" || task.CallbackURL != "http://127.0.0.1:1/not-used" {
+		t.Fatalf("消费端快照错误: name=%q url=%q", task.ConsumerName, task.CallbackURL)
+	}
 	if task.AgentID != "1000002" {
 		t.Fatalf("AgentID 透传失败: %q", task.AgentID)
 	}
@@ -238,6 +241,9 @@ func TestCallbackCreatesWecomProxyTaskSnapshot(t *testing.T) {
 	}
 	if task.AgentID != "1000049" {
 		t.Fatalf("AgentID 快照错误: %q", task.AgentID)
+	}
+	if task.ConsumerName != proxyConsumer.Name || task.CallbackURL != proxyConsumer.CallbackURL {
+		t.Fatalf("消费端快照错误: name=%q url=%q", task.ConsumerName, task.CallbackURL)
 	}
 }
 

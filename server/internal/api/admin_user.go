@@ -93,6 +93,7 @@ func (h *AdminUserHandler) Create(c *gin.Context) {
 		Nickname:     strings.TrimSpace(req.Nickname),
 		Role:         role,
 		Enabled:      enabled,
+		TokenVersion: 1,
 	}
 	if err := h.db.Create(&user).Error; err != nil {
 		Fail(c, http.StatusInternalServerError, "创建管理员失败")
@@ -126,6 +127,7 @@ func (h *AdminUserHandler) Update(c *gin.Context) {
 		return
 	}
 	updates := map[string]any{}
+	revokeTokens := false
 	if req.Nickname != nil {
 		updates["nickname"] = strings.TrimSpace(*req.Nickname)
 	}
@@ -139,6 +141,9 @@ func (h *AdminUserHandler) Update(c *gin.Context) {
 			Fail(c, http.StatusBadRequest, "不能降低自己的角色")
 			return
 		}
+		if role != user.Role {
+			revokeTokens = true
+		}
 		updates["role"] = role
 	}
 	if req.Enabled != nil {
@@ -146,11 +151,17 @@ func (h *AdminUserHandler) Update(c *gin.Context) {
 			Fail(c, http.StatusBadRequest, "不能禁用自己的账号")
 			return
 		}
+		if *req.Enabled != user.Enabled {
+			revokeTokens = true
+		}
 		updates["enabled"] = *req.Enabled
 	}
 	if len(updates) == 0 {
 		OK(c, user)
 		return
+	}
+	if revokeTokens {
+		updates["token_version"] = gorm.Expr("token_version + 1")
 	}
 	if err := h.db.Model(&user).Updates(updates).Error; err != nil {
 		Fail(c, http.StatusInternalServerError, "修改管理员失败")
@@ -189,7 +200,10 @@ func (h *AdminUserHandler) ResetPassword(c *gin.Context) {
 		Fail(c, http.StatusInternalServerError, "密码加密失败")
 		return
 	}
-	if err := h.db.Model(&user).Update("password_hash", hash).Error; err != nil {
+	if err := h.db.Model(&user).Updates(map[string]any{
+		"password_hash": hash,
+		"token_version": gorm.Expr("token_version + 1"),
+	}).Error; err != nil {
 		Fail(c, http.StatusInternalServerError, "重置密码失败")
 		return
 	}

@@ -6,6 +6,9 @@
         <p class="page-subtitle">自动重试耗尽的投递记录，可查看原始载荷并人工重推、标记丢弃或永久删除</p>
       </div>
       <div>
+        <el-checkbox v-if="canWrite" v-model="pageUseSnapshot" style="margin-right: 12px">
+          重推使用死信快照
+        </el-checkbox>
         <el-button
           v-if="canWrite"
           type="warning"
@@ -147,7 +150,16 @@
             <el-tag :type="statusType(detail.status)">{{ statusLabel(detail.status) }}</el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="重试次数">{{ detail.retry_count }}</el-descriptions-item>
-          <el-descriptions-item label="回调地址" :span="2">
+          <el-descriptions-item label="当前消费端状态">
+            <el-tag :type="consumerStateType(detail)">{{ consumerStateLabel(detail) }}</el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="当前转发模式">
+            {{ forwardModeLabel(detail.current_forward_mode) }}
+          </el-descriptions-item>
+          <el-descriptions-item label="当前回调地址" :span="2">
+            <span class="mono">{{ detail.current_callback_url || '-' }}</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="快照回调地址" :span="2">
             <span class="mono">{{ detail.callback_url }}</span>
           </el-descriptions-item>
           <el-descriptions-item label="快照 CorpID" :span="2">
@@ -170,11 +182,15 @@
         </el-descriptions>
 
         <el-alert
-          type="warning"
+          :type="consumerAvailable(detail) ? 'info' : 'warning'"
           :closable="false"
           show-icon
-          title="重推使用死信创建时的配置快照"
-          description="如果快照中的 CorpID / Token / AESKey 与当前消费端配置不一致（例如死信是在修正配置之前产生的），重推仍会解密失败。请先在消费端列表点击“测试”验证当前配置，或触发一次新的真实事件生成新任务。"
+          :title="consumerAvailable(detail) ? '重推默认使用消费端最新配置' : '消费端不可用，需使用死信快照重推'"
+          :description="
+            consumerAvailable(detail)
+              ? 'URL/鉴权/密钥/超时使用消费端当前配置；转发模式与载荷仍使用死信创建时的快照。勾选“使用死信快照配置”可复现历史配置。'
+              : '消费端已删除或禁用，默认重推会被拒绝；请先恢复消费端，或勾选“使用死信快照配置”按历史快照重推。'
+          "
           style="margin-top: 16px"
         />
 
@@ -191,21 +207,26 @@
           <pre class="pre-block">{{ detail.inbound_query || '（无）' }}</pre>
         </template>
 
-        <div v-if="canWrite" style="margin-top: 20px; display: flex; gap: 10px">
-          <el-button
-            type="success"
-            :disabled="!canReplay(detail)"
-            :loading="detailReplaying"
-            @click="handleReplay(detail, true)"
-          >
-            立即重推
-          </el-button>
-          <el-button type="warning" plain :disabled="detail.status !== 'pending'" @click="handleDiscard(detail, true)">
-            标记不再重推
-          </el-button>
-          <el-button type="danger" plain :disabled="detail.status === 'replaying'" @click="handleDelete(detail)">
-            永久删除
-          </el-button>
+        <div v-if="canWrite" style="margin-top: 20px">
+          <el-checkbox v-model="detailUseSnapshot" style="margin-bottom: 10px">
+            使用死信快照配置
+          </el-checkbox>
+          <div style="display: flex; gap: 10px">
+            <el-button
+              type="success"
+              :disabled="!canReplay(detail)"
+              :loading="detailReplaying"
+              @click="handleReplay(detail, true)"
+            >
+              立即重推
+            </el-button>
+            <el-button type="warning" plain :disabled="detail.status !== 'pending'" @click="handleDiscard(detail, true)">
+              标记不再重推
+            </el-button>
+            <el-button type="danger" plain :disabled="detail.status === 'replaying'" @click="handleDelete(detail)">
+              永久删除
+            </el-button>
+          </div>
         </div>
         <p v-else class="hint" style="margin-top: 16px">当前为只读账号，无法重推、丢弃或删除死信。</p>
       </template>
@@ -236,6 +257,8 @@ const total = ref(0)
 const selection = ref([])
 const batchReplaying = ref(false)
 const batchDeleting = ref(false)
+const pageUseSnapshot = ref(false)
+const detailUseSnapshot = ref(false)
 const replayableSelection = computed(() => selection.value.filter((item) => canReplay(item)))
 const dateRange = ref([])
 const query = reactive({ page: 1, page_size: 20, keyword: '', status: '', forward_mode: '' })
@@ -265,6 +288,23 @@ function statusType(status) {
 }
 function canReplay(row) {
   return row.status === 'pending' || row.status === 'discarded'
+}
+function consumerAvailable(row) {
+  return Boolean(row.consumer_exists && !row.consumer_deleted && row.consumer_enabled)
+}
+function consumerStateLabel(row) {
+  if (!row.consumer_exists || row.consumer_deleted) return '已删除/不存在'
+  if (!row.consumer_enabled) return '已禁用'
+  return '正常'
+}
+function consumerStateType(row) {
+  return consumerAvailable(row) ? 'success' : 'danger'
+}
+function forwardModeLabel(mode) {
+  if (mode === 'wecom_xml') return '企微兼容模式'
+  if (mode === 'wecom_proxy') return '原样透传'
+  if (mode === 'json') return 'JSON 模式'
+  return '-'
 }
 function formatTime(value) {
   return value ? new Date(value).toLocaleString() : '-'
@@ -308,12 +348,15 @@ function search() {
 async function openDetail(row) {
   const data = await getDeadLetter(row.id)
   detail.value = data
+  detailUseSnapshot.value = false
   detailVisible.value = true
 }
 
 async function handleReplay(row, fromDrawer = false) {
+  const useSnapshot = fromDrawer ? detailUseSnapshot.value : pageUseSnapshot.value
+  const source = useSnapshot ? '死信创建时的历史快照' : '消费端当前最新配置'
   try {
-    await ElMessageBox.confirm(`确认重推事件「${row.event_id}」？`, '重推确认', {
+    await ElMessageBox.confirm(`确认使用${source}重推事件「${row.event_id}」？`, '重推确认', {
       type: 'info',
       confirmButtonText: '重推',
       cancelButtonText: '取消'
@@ -323,8 +366,14 @@ async function handleReplay(row, fromDrawer = false) {
   }
   if (fromDrawer) detailReplaying.value = true
   try {
-    await replayDeadLetter(row.id)
-    ElMessage.success('重推成功，死信已标记为已解决')
+    const result = await replayDeadLetter(row.id, useSnapshot)
+    if (result?.task_synced === false) {
+      ElMessage.warning('重推成功，但对应推送记录未找到或状态已变化')
+    } else {
+      ElMessage.success(
+        useSnapshot ? '重推成功（使用历史快照），死信已标记为已解决' : '重推成功，死信已标记为已解决'
+      )
+    }
     detailVisible.value = false
     await load()
   } finally {
@@ -342,8 +391,10 @@ async function handleBatchReplay() {
     ElMessage.warning('单次最多重推 50 条')
     return
   }
+  const useSnapshot = pageUseSnapshot.value
+  const source = useSnapshot ? '死信创建时的历史快照' : '消费端当前最新配置'
   try {
-    await ElMessageBox.confirm(`确认批量重推选中的 ${ids.length} 条死信？`, '批量重推确认', {
+    await ElMessageBox.confirm(`确认使用${source}批量重推选中的 ${ids.length} 条死信？`, '批量重推确认', {
       type: 'warning',
       confirmButtonText: '开始重推',
       cancelButtonText: '取消'
@@ -353,7 +404,7 @@ async function handleBatchReplay() {
   }
   batchReplaying.value = true
   try {
-    const result = await batchReplayDeadLetters(ids)
+    const result = await batchReplayDeadLetters(ids, useSnapshot)
     ElMessage.success(`重推完成：成功 ${result.success} 条，失败 ${result.failed} 条`)
     if (result.failed > 0) {
       const failed = (result.results || []).filter((item) => !item.success)

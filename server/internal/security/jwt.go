@@ -12,9 +12,10 @@ import (
 
 // Claims 管理端 JWT 载荷。
 type Claims struct {
-	UserID   uint64 `json:"uid"`
-	Username string `json:"username"`
-	Role     string `json:"role"`
+	UserID       uint64 `json:"uid"`
+	Username     string `json:"username"`
+	Role         string `json:"role"`
+	TokenVersion int64  `json:"tv"`
 	jwt.RegisteredClaims
 }
 
@@ -33,9 +34,10 @@ func (m *Manager) Generate(user model.AdminUser) (string, time.Time, error) {
 	now := time.Now()
 	expiresAt := now.Add(m.expire)
 	claims := Claims{
-		UserID:   user.ID,
-		Username: user.Username,
-		Role:     user.Role,
+		UserID:       user.ID,
+		Username:     user.Username,
+		Role:         user.Role,
+		TokenVersion: user.TokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "wecom-callback-relay",
 			Subject:   user.Username,
