@@ -5,6 +5,7 @@ import LoginView from '../views/LoginView.vue'
 import DashboardView from '../views/DashboardView.vue'
 import ConsumersView from '../views/ConsumersView.vue'
 import WecomConfigView from '../views/WecomConfigView.vue'
+import PushRecordsView from '../views/PushRecordsView.vue'
 import DeadLettersView from '../views/DeadLettersView.vue'
 import AdminUsersView from '../views/AdminUsersView.vue'
 import AuditLogsView from '../views/AuditLogsView.vue'
@@ -19,6 +20,7 @@ const routes = [
       { path: 'dashboard', name: 'dashboard', component: DashboardView, meta: { title: '概览' } },
       { path: 'consumers', name: 'consumers', component: ConsumersView, meta: { title: '消费端管理' } },
       { path: 'wecom-config', name: 'wecom-config', component: WecomConfigView, meta: { title: '企微参数' } },
+      { path: 'push-records', name: 'push-records', component: PushRecordsView, meta: { title: '推送记录' } },
       { path: 'dead-letters', name: 'dead-letters', component: DeadLettersView, meta: { title: '死信管理' } },
       {
         path: 'admin-users',

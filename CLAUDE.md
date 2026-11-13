@@ -19,6 +19,7 @@ go test ./...                                # 全部单元 + 集成测试
 go test ./internal/wecom -v                  # 企微加解密 / XML 映射
 go test ./internal/relay -v                  # 双模式投递 / HMAC / 退避
 go test ./internal/api -run TestCallback -v  # 回调集成测试（纯 Go SQLite）
+go test ./internal/api -run TestPushRecord -v # 推送记录列表/详情/删除
 go test ./internal/api -run TestCallbackReceive -v
 go vet ./...
 go build ./...
@@ -69,7 +70,7 @@ docker compose logs -f backend
 
 - `consumers`：`forward_mode` = `json|wecom_xml`；兼容模式保存加密后的 `wecom_token`、`wecom_encoding_aes_key`、明文 `wecom_corp_id`。
 - `wecom_config`：本期单条记录，`secret/token/encoding_aes_key` 加密存储。
-- `relay_tasks`：`(event_id, consumer_id)` 唯一索引，快照 `raw_xml` 与 `json_payload`。
+- `relay_tasks`：`(event_id, consumer_id)` 唯一索引，快照 `raw_xml`、`json_payload`、`consumer_name`、`callback_url`，并记录最近一次投递结果 `last_http_status`/`last_latency_ms`。
 - `dead_letters`：保存投递目标、认证与密钥快照；状态 `pending|replaying|resolved|discarded`。
 - `admin_users`、`audit_logs`。
 
@@ -88,6 +89,7 @@ docker compose logs -f backend
 11. **多实例**：Worker 的 `SKIP LOCKED` 抢占依赖 MySQL 8.0+；SQLite 仅用于测试，不支持该锁，因此不要给 Worker 写 SQLite 集成测试。
 12. **前端令牌键**是 `relay_token` / `relay_user`（`web/src/store/auth.js`）；HTTP 401 时会清理并跳转登录（`web/src/api/http.js`）。
 13. **前端敏感字段**：编辑消费端/企微参数时，密码类输入框留空表示不修改；不要用脱敏值回填真实输入框后再提交（会被当成新值）。
+14. **推送记录**：直接复用 `relay_tasks`，不新建按次尝试表；`GET /api/push-records` 只返回小字段，详情单独拉 `raw_xml/json_payload`。仅 `success/failed/dead` 可删除，`pending/sending` 单条返回 409、批量自动跳过；删除 `dead` 记录不影响死信，死信人工重推也不回写 `relay_tasks`。保留天数由 `PUSH_RECORD_RETENTION_DAYS` 控制（默认 30，`0` 永久），Worker 每日清理终态记录。
 
 ## 测试布局
 
@@ -97,6 +99,7 @@ docker compose logs -f backend
 - `internal/relay/worker_wecom_test.go`：企微兼容模式与原样透传模式的 Worker 投递。
 - `internal/relay/backoff_test.go`：退避序列。
 - `internal/api/callback_test.go`：基于 `github.com/glebarez/sqlite` 的回调集成测试（GET 验证、POST、幂等、403、解析失败、AgentID 透传）。
+- `internal/api/push_record_test.go`：推送记录列表/详情/删除/批量删除与终态保护。
 - `internal/security/cipher_test.go`：AES-GCM 与脱敏。
 
 ## 与需求文档的已知差异

@@ -85,6 +85,7 @@ const allMenuItems = [
   { path: '/dashboard', label: '概览', icon: 'Odometer' },
   { path: '/consumers', label: '消费端管理', icon: 'Connection' },
   { path: '/wecom-config', label: '企微参数', icon: 'Key' },
+  { path: '/push-records', label: '推送记录', icon: 'Tickets' },
   { path: '/dead-letters', label: '死信管理', icon: 'Warning' },
   { path: '/admin-users', label: '管理员', icon: 'User', adminOnly: true },
   { path: '/audit-logs', label: '操作审计', icon: 'Document' }

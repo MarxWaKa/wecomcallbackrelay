@@ -66,7 +66,7 @@ func run() error {
 	logKeyFingerprints(db, cipher, logger)
 	jwtManager := security.NewJWTManager(cfg.JWTSecret, cfg.JWTExpire)
 	sender := relay.NewSender(logger, cfg.LogRawEvents)
-	worker := relay.NewWorker(db, cipher, sender, logger, cfg.WorkerInterval, cfg.WorkerConcurrency, cfg.RetryBackoff, cfg.LogRawEvents)
+	worker := relay.NewWorker(db, cipher, sender, logger, cfg.WorkerInterval, cfg.WorkerConcurrency, cfg.RetryBackoff, cfg.LogRawEvents, cfg.PushRecordRetentionDays)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -100,6 +100,7 @@ func run() error {
 			"port", cfg.ServerPort,
 			"worker_interval", cfg.WorkerInterval.String(),
 			"retry_backoff", fmt.Sprint(cfg.RetryBackoff),
+			"push_record_retention_days", cfg.PushRecordRetentionDays,
 		)
 		if listenErr := server.ListenAndServe(); listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) {
 			errCh <- listenErr

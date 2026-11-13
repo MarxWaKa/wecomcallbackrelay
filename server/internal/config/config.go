@@ -25,21 +25,22 @@ func (d DBConfig) DSN() string {
 
 // Config 服务全部配置，均来自环境变量。
 type Config struct {
-	ServerPort        string
-	GinMode           string
-	LogLevel          string
-	LogRawEvents      bool
-	DB                DBConfig
-	JWTSecret         string
-	JWTExpire         time.Duration
-	EncryptKey        string
-	AdminUsername     string
-	AdminPassword     string
-	WorkerInterval    time.Duration
-	WorkerConcurrency int
-	RetryBackoff      []time.Duration
-	CallbackMaxSkew   time.Duration
-	CORSOrigins       []string
+	ServerPort              string
+	GinMode                 string
+	LogLevel                string
+	LogRawEvents            bool
+	DB                      DBConfig
+	JWTSecret               string
+	JWTExpire               time.Duration
+	EncryptKey              string
+	AdminUsername           string
+	AdminPassword           string
+	WorkerInterval          time.Duration
+	WorkerConcurrency       int
+	RetryBackoff            []time.Duration
+	PushRecordRetentionDays int
+	CallbackMaxSkew         time.Duration
+	CORSOrigins             []string
 }
 
 // Load 读取并校验环境变量配置。
@@ -56,15 +57,16 @@ func Load() (*Config, error) {
 			Password: env("DB_PASSWORD", ""),
 			Name:     env("DB_NAME", "wecom_relay"),
 		},
-		JWTSecret:         env("JWT_SECRET", ""),
-		JWTExpire:         time.Duration(envInt("JWT_EXPIRE_HOURS", 24)) * time.Hour,
-		EncryptKey:        env("CONFIG_ENCRYPT_KEY", ""),
-		AdminUsername:     env("ADMIN_USERNAME", "admin"),
-		AdminPassword:     env("ADMIN_PASSWORD", ""),
-		WorkerInterval:    time.Duration(envInt("WORKER_INTERVAL_SECONDS", 2)) * time.Second,
-		WorkerConcurrency: envInt("WORKER_CONCURRENCY", 8),
-		CallbackMaxSkew:   time.Duration(envInt("CALLBACK_MAX_SKEW_SECONDS", 300)) * time.Second,
-		CORSOrigins:       splitCSV(env("CORS_ALLOW_ORIGINS", "*")),
+		JWTSecret:               env("JWT_SECRET", ""),
+		JWTExpire:               time.Duration(envInt("JWT_EXPIRE_HOURS", 24)) * time.Hour,
+		EncryptKey:              env("CONFIG_ENCRYPT_KEY", ""),
+		AdminUsername:           env("ADMIN_USERNAME", "admin"),
+		AdminPassword:           env("ADMIN_PASSWORD", ""),
+		WorkerInterval:          time.Duration(envInt("WORKER_INTERVAL_SECONDS", 2)) * time.Second,
+		WorkerConcurrency:       envInt("WORKER_CONCURRENCY", 8),
+		PushRecordRetentionDays: envInt("PUSH_RECORD_RETENTION_DAYS", 30),
+		CallbackMaxSkew:         time.Duration(envInt("CALLBACK_MAX_SKEW_SECONDS", 300)) * time.Second,
+		CORSOrigins:             splitCSV(env("CORS_ALLOW_ORIGINS", "*")),
 	}
 
 	retryBackoff, err := parseBackoff(env("RETRY_BACKOFF_SECONDS", "1,2,4,8,16"))
@@ -87,6 +89,9 @@ func Load() (*Config, error) {
 	}
 	if c.WorkerInterval < time.Second {
 		c.WorkerInterval = time.Second
+	}
+	if c.PushRecordRetentionDays < 0 {
+		return nil, fmt.Errorf("PUSH_RECORD_RETENTION_DAYS 不能为负数")
 	}
 	if c.CallbackMaxSkew <= 0 {
 		c.CallbackMaxSkew = 300 * time.Second

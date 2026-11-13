@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS `relay_tasks` (
   `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `event_id`      VARCHAR(100) NOT NULL,
   `consumer_id`   BIGINT UNSIGNED NOT NULL,
+  `consumer_name` VARCHAR(100) DEFAULT NULL,
+  `callback_url`  VARCHAR(500) DEFAULT NULL,
   `forward_mode`  VARCHAR(20)  NOT NULL,
   `agent_id`      VARCHAR(64)  DEFAULT NULL,
   `raw_xml`       MEDIUMTEXT   DEFAULT NULL,
@@ -69,11 +71,15 @@ CREATE TABLE IF NOT EXISTS `relay_tasks` (
   `max_retry`     BIGINT       NOT NULL DEFAULT 5,
   `next_retry_at` DATETIME(3)  DEFAULT NULL,
   `last_error`    TEXT         DEFAULT NULL,
+  `last_http_status` BIGINT    NOT NULL DEFAULT 0,
+  `last_latency_ms`  BIGINT    NOT NULL DEFAULT 0,
   `created_at`    DATETIME(3)  DEFAULT NULL,
   `updated_at`    DATETIME(3)  DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_event_consumer` (`event_id`, `consumer_id`),
-  KEY `idx_status_retry` (`status`, `next_retry_at`)
+  KEY `idx_status_retry` (`status`, `next_retry_at`),
+  KEY `idx_status_updated` (`status`, `updated_at`),
+  KEY `idx_relay_tasks_consumer_id` (`consumer_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `dead_letters` (

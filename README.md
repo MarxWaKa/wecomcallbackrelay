@@ -17,6 +17,7 @@
 - 三种模式异步转发，按消费端独立配置超时、重试次数与认证方式。
 - `relay_tasks` 任务持久化，Worker 每 2 秒轮询并发投递。
 - 失败重试（默认 1s/2s/4s/8s/16s，可通过 `RETRY_BACKOFF_SECONDS` 配置），耗尽自动转死信。
+- 推送记录：按「事件 × 消费端」查看全部投递任务与最近一次 HTTP 状态/耗时，支持详情、单条/批量删除（仅已结束任务）。
 - 死信列表、详情、单条/批量重推（单次上限 50）、标记丢弃、单条/批量永久删除（单次上限 100）。
 - 消费端与企微参数 CRUD，敏感字段 AES-256-GCM 加密存储、接口脱敏、编辑留空不修改。
 - 管理员登录、JWT、Casbin 角色授权（admin / viewer）、修改密码、管理员管理。
@@ -154,6 +155,7 @@ docker compose logs -f backend
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 首次启动 | `admin` / - | 初始管理员；已有账号时不会覆盖 |
 | `WORKER_INTERVAL_SECONDS` | 否 | `2` | 任务轮询间隔 |
 | `RETRY_BACKOFF_SECONDS` | 否 | `1,2,4,8,16` | 重试退避秒数序列，逗号分隔；固定 30 分钟填 `1800` |
+| `PUSH_RECORD_RETENTION_DAYS` | 否 | `30` | 推送记录（`relay_tasks`）保留天数；`0` 表示永久保留、不自动清理 |
 | `WORKER_CONCURRENCY` | 否 | `8` | 单批并发投递数 |
 | `CALLBACK_MAX_SKEW_SECONDS` | 否 | `300` | 入站时间戳允许偏差 |
 | `CORS_ALLOW_ORIGINS` | 否 | `*` | 管理 API 跨域白名单，逗号分隔 |
@@ -228,6 +230,10 @@ go vet ./...
 | POST | `/api/base/logout` | JWT | 登出 |
 | POST | `/api/base/change-password` | JWT | 修改密码 |
 | GET | `/api/dashboard/summary` | JWT | 概览统计 |
+| GET | `/api/push-records` | JWT+Casbin | 推送记录列表 |
+| GET | `/api/push-records/:id` | JWT+Casbin | 推送记录详情 |
+| DELETE | `/api/push-records/:id` | JWT+Casbin | 删除单条推送记录（仅已结束任务） |
+| POST | `/api/push-records/batch-delete` | JWT+Casbin | 批量删除推送记录（≤100，跳过待投递/投递中） |
 | GET/POST | `/api/consumers` | JWT+Casbin | 消费端列表 / 新增 |
 | GET/PUT/DELETE | `/api/consumers/:id` | JWT+Casbin | 详情 / 修改 / 删除 |
 | POST | `/api/consumers/:id/test` | JWT+Casbin | 连通性测试 |
@@ -249,6 +255,8 @@ go vet ./...
 
 - `admin`：可读写全部管理接口。
 - `viewer`：仅可 GET；无法修改配置、重推死信或管理管理员。
+
+> 推送记录直接复用 `relay_tasks`：仅 `success`/`failed`/`dead` 可删除；`pending`/`sending` 单条删除返回 409，批量删除自动跳过。删除 `dead` 推送记录不会删除对应死信；死信人工重推结果不回写推送记录。
 
 ## 转发协议
 
@@ -381,7 +389,7 @@ JSON `payload` 中对应的键：
 - **人工重推**：仅 `pending` / `discarded` 可重推；`replaying` 返回 409 防连点；失败自动回退 `pending` 并记录错误；人工重推不计入自动重试次数。
 - **永久删除**：支持单条删除与批量删除（单次 ≤100）；`replaying` 状态的死信会返回 409 / 批量时自动跳过；删除不可恢复，操作会写入审计日志。
 - **告警**：pending 死信超过 10 条或最老记录超过 1 小时，后端输出 ERROR 日志（每 10 分钟检查）。
-- **清理**：`resolved` 死信保留 30 天、`discarded` 保留 7 天；`success`/`failed` 任务保留 30 天，每日自动清理。
+- **清理**：`resolved` 死信保留 30 天、`discarded` 保留 7 天；`success`/`failed`/`dead` 推送记录按 `PUSH_RECORD_RETENTION_DAYS` 保留（默认 30 天，`0` 永久保留），每日自动清理。
 - **日志**：JSON 结构化输出到 stdout，由 Docker json-file 驱动落盘；日志不包含 Secret、Token、AESKey 与请求体明文。
 - **备份**：定期备份 MySQL 数据卷；`CONFIG_ENCRYPT_KEY` 必须与数据库备份一起妥善保管，否则敏感字段无法解密。
 - **多实例**：Worker 使用 `SKIP LOCKED` 抢占，可水平扩展；异常中断的 `sending` 任务在启动 5 分钟后自动回收。

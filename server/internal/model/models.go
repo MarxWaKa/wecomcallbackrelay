@@ -99,20 +99,24 @@ func (WecomConfig) TableName() string { return "wecom_config" }
 type RelayTask struct {
 	ID               uint64     `gorm:"primaryKey" json:"id"`
 	EventID          string     `gorm:"size:100;not null;uniqueIndex:uk_event_consumer,priority:1" json:"event_id"`
-	ConsumerID       uint64     `gorm:"not null;uniqueIndex:uk_event_consumer,priority:2" json:"consumer_id"`
+	ConsumerID       uint64     `gorm:"not null;uniqueIndex:uk_event_consumer,priority:2;index" json:"consumer_id"`
+	ConsumerName     string     `gorm:"size:100" json:"consumer_name"` // 创建时快照
+	CallbackURL      string     `gorm:"size:500" json:"callback_url"`  // 创建时快照
 	ForwardMode      string     `gorm:"size:20;not null" json:"forward_mode"`
 	AgentID          string     `gorm:"size:64" json:"agent_id"`
 	RawXML           string     `gorm:"type:mediumtext" json:"raw_xml"`
 	JSONPayload      string     `gorm:"type:longtext" json:"json_payload"`
 	RawEncryptedBody string     `gorm:"type:mediumtext" json:"raw_encrypted_body"` // wecom_proxy 模式原始加密报文
 	InboundQuery     string     `gorm:"type:text" json:"inbound_query"`            // wecom_proxy 模式原始 Query
-	Status           string     `gorm:"size:20;not null;default:pending;index:idx_status_retry,priority:1" json:"status"`
+	Status           string     `gorm:"size:20;not null;default:pending;index:idx_status_retry,priority:1;index:idx_status_updated,priority:1" json:"status"`
 	RetryCount       int        `gorm:"not null;default:0" json:"retry_count"`
 	MaxRetry         int        `gorm:"not null;default:5" json:"max_retry"`
 	NextRetryAt      *time.Time `gorm:"index:idx_status_retry,priority:2" json:"next_retry_at"`
 	LastError        string     `gorm:"type:text" json:"last_error"`
+	LastHTTPStatus   int        `gorm:"not null;default:0" json:"last_http_status"`
+	LastLatencyMS    int64      `gorm:"not null;default:0" json:"last_latency_ms"`
 	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	UpdatedAt        time.Time  `gorm:"index:idx_status_updated,priority:2" json:"updated_at"`
 }
 
 func (RelayTask) TableName() string { return "relay_tasks" }

@@ -53,6 +53,7 @@ func New(deps Dependencies) (*gin.Engine, error) {
 	consumerHandler := api.NewConsumerHandler(deps.DB, deps.Cipher, deps.Sender, deps.Logger)
 	wecomConfigHandler := api.NewWecomConfigHandler(deps.DB, deps.Cipher, deps.Logger)
 	deadLetterHandler := api.NewDeadLetterHandler(deps.DB, deps.Cipher, deps.Sender, deps.Logger)
+	pushRecordHandler := api.NewPushRecordHandler(deps.DB, deps.Logger)
 	dashboardHandler := api.NewDashboardHandler(deps.DB)
 	auditHandler := api.NewAuditHandler(deps.DB)
 	callbackHandler := api.NewCallbackHandler(deps.DB, deps.Cipher, deps.Logger, deps.Config.CallbackMaxSkew, deps.Config.LogRawEvents)
@@ -100,6 +101,13 @@ func New(deps Dependencies) (*gin.Engine, error) {
 		wecomConfig.POST("", wecomConfigHandler.Create)
 		wecomConfig.PUT("/:id", wecomConfigHandler.Update)
 		wecomConfig.DELETE("/:id", wecomConfigHandler.Delete)
+
+		pushRecords := secured.Group("/push-records")
+		pushRecords.GET("", pushRecordHandler.List)
+		pushRecords.GET("/:id", pushRecordHandler.Get)
+		// 删除属于破坏性操作：Casbin 已限制 viewer 仅 GET，这里再加一层角色校验。
+		pushRecords.POST("/batch-delete", middleware.RequireRole(appmodel.RoleAdmin), pushRecordHandler.DeleteBatch)
+		pushRecords.DELETE("/:id", middleware.RequireRole(appmodel.RoleAdmin), pushRecordHandler.Delete)
 
 		deadLetters := secured.Group("/dead-letters")
 		deadLetters.GET("", deadLetterHandler.List)
